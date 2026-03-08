@@ -1,0 +1,63 @@
+{
+  "name": "maya-mixa",
+  "version": "2.5.0",
+  "description": "Maya Mixa desktop + cloud-ready DJ copilot",
+  "main": "electron/main.cjs",
+  "author": "Maya Mixa",
+  "license": "UNLICENSED",
+  "scripts": {
+    "backend:dev": "./run_backend.sh",
+    "backend:prod": "uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-4173}",
+    "cloud:configure-runtime": "node scripts/configure-runtime.mjs",
+    "cloud:smoke": "node scripts/smoke-cloud.mjs",
+    "electron:dev:local": "cross-env MAYA_API_BASE=http://127.0.0.1:4173 electron .",
+    "electron:dev:cloud": "electron .",
+    "electron:dist": "electron-builder",
+    "electron:dist:mac": "electron-builder --mac",
+    "electron:dist:win": "electron-builder --win",
+    "electron:dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^30.5.1",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.mayamixa.client",
+    "productName": "Maya Mixa",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "index.html",
+      "app.js",
+      "assets/**/*",
+      "backend/**/*",
+      "electron/**/*",
+      "config/**/*",
+      "requirements.txt",
+      "README.md"
+    ],
+    "mac": {
+      "icon": "assets/icons/maya-icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.music"
+    },
+    "win": {
+      "icon": "assets/icons/maya-icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "icon": "assets/icons/maya-icon-512.png",
+      "target": [
+        "AppImage"
+      ]
+    }
+  }
+}

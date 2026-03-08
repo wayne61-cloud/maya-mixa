@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: maya-mixa-cloud
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    disk:
+      name: maya-mixa-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: MAYA_ENV
+        value: production
+      - key: MAYA_AUTH_SECRET
+        generateValue: true
+      - key: MAYA_AUTH_PASSWORDLESS
+        value: "true"
+      - key: MAYA_BOOTSTRAP_ADMIN
+        value: "true"
+      - key: MAYA_BOOTSTRAP_ADMIN_LOGIN
+        value: admin
+      - key: MAYA_BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: MAYA_BOOTSTRAP_ADMIN_DISPLAY
+        value: Administrator
+      - key: MAYA_BOOTSTRAP_ADMIN_DJ_NAME
+        value: Admin
+      - key: MAYA_ALLOW_NULL_ORIGIN
+        value: "true"
+      - key: MAYA_ENABLE_LIBRARY_SCAN
+        value: "false"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini

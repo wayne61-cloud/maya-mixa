@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.playwright-cli/
+node_modules/
+release/
+dist/
+output/
+data/maya.db
+data/*.db-shm
+data/*.db-wal
+data/demo_audio/
+data/serato_feed.json
+.DS_Store

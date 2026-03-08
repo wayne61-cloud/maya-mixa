@@ -1,0 +1,44 @@
+name: Build Electron Installers
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            command: npm run electron:dist:mac
+            artifact_name: maya-mixa-mac
+          - os: windows-latest
+            command: npm run electron:dist:win
+            artifact_name: maya-mixa-win
+          - os: ubuntu-latest
+            command: npm run electron:dist:linux
+            artifact_name: maya-mixa-linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        run: ${{ matrix.command }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/**
