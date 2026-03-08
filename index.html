@@ -2130,8 +2130,9 @@
   <div class="toast" id="toast"></div>
 
   <script>
+    const MAYA_DEFAULT_API = "https://maya-mixa-cloud.onrender.com";
     window.__MAYA_CONFIG__ = window.__MAYA_CONFIG__ || {
-      apiBase: window.location.protocol.startsWith("http") ? window.location.origin : ""
+      apiBase: window.location.protocol.startsWith("http") ? window.location.origin : MAYA_DEFAULT_API
     };
   </script>
   <script src="./app.js"></script>
