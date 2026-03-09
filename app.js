@@ -28,6 +28,10 @@
   })();
   const desktopSeratoApi =
     typeof window !== "undefined" && window.mayaDesktop && window.mayaDesktop.serato ? window.mayaDesktop.serato : null;
+  const desktopLibraryApi =
+    typeof window !== "undefined" && window.mayaDesktop && window.mayaDesktop.library ? window.mayaDesktop.library : null;
+  const desktopUpdatesApi =
+    typeof window !== "undefined" && window.mayaDesktop && window.mayaDesktop.updates ? window.mayaDesktop.updates : null;
 
   const state = {
     activeScreen: "now-playing",
@@ -75,6 +79,8 @@
       lastPushAt: null,
       lastError: "",
     },
+    desktopLibrary: { available: Boolean(desktopLibraryApi), roots: [], scanned: 0, truncated: false, lastError: "" },
+    desktopUpdate: { checkedAt: null, currentVersion: "", latestVersion: "", updateAvailable: false, releaseUrl: "", error: "" },
     transitionFilters: { a: "", b: "" },
     sessionBuilder: { selectedTrackIds: [], analyses: [] },
 
@@ -360,8 +366,7 @@
 
   function updateApiConfigUi() {
     if (!el.apiConfigCard || !el.apiBaseInput || !el.apiBaseStatus) return;
-    const shouldShow = !hasApiBaseConfigured();
-    el.apiConfigCard.classList.toggle("hidden", !shouldShow);
+    el.apiConfigCard.classList.remove("hidden");
     el.apiBaseInput.value = runtimeConfig.apiBase || "";
     if (hasApiBaseConfigured()) {
       el.apiBaseStatus.textContent = `API: ${runtimeConfig.apiBase}`;
@@ -668,6 +673,8 @@
       lastPushAt: null,
       lastError: "",
     };
+    state.desktopLibrary = { available: Boolean(desktopLibraryApi), roots: [], scanned: 0, truncated: false, lastError: "" };
+    state.desktopUpdate = { checkedAt: null, currentVersion: "", latestVersion: "", updateAvailable: false, releaseUrl: "", error: "" };
   }
 
   function resetSensitiveInputs() {
@@ -1428,6 +1435,37 @@
     }, 2600);
   }
 
+  async function checkDesktopUpdates(silent = true) {
+    if (!desktopUpdatesApi) return null;
+    try {
+      const payload = await desktopUpdatesApi.check();
+      if (payload && typeof payload === "object") {
+        state.desktopUpdate = {
+          checkedAt: payload.checkedAt || new Date().toISOString(),
+          currentVersion: payload.currentVersion || "",
+          latestVersion: payload.latestVersion || "",
+          updateAvailable: Boolean(payload.updateAvailable),
+          releaseUrl: payload.releaseUrl || "",
+          error: payload.error || "",
+        };
+        if (state.desktopUpdate.updateAvailable && !silent) {
+          showToast(`Mise à jour desktop dispo: v${state.desktopUpdate.latestVersion}`);
+        }
+      }
+    } catch (error) {
+      state.desktopUpdate = {
+        checkedAt: new Date().toISOString(),
+        currentVersion: "",
+        latestVersion: "",
+        updateAvailable: false,
+        releaseUrl: "",
+        error: humanizeError(error),
+      };
+    }
+    updateTopStatus();
+    return state.desktopUpdate;
+  }
+
   function stopPollers() {
     clearInterval(state.poller);
     clearInterval(state.recommendationsPoller);
@@ -1940,6 +1978,33 @@
     }
   }
 
+  function prefillTransitionFromRecommendation(trackId) {
+    const id = Number(trackId || 0);
+    if (!id) return;
+    const currentId = Number(state.serato.deckA?.track_id || el.trackASelect?.value || 0);
+    if (currentId && currentId !== id && el.trackASelect && el.trackBSelect) {
+      el.trackASelect.value = String(currentId);
+      el.trackBSelect.value = String(id);
+      renderTransitionTrackPreview(getTrackById(currentId), el.trackAPreview, "Track A");
+      renderTransitionTrackPreview(getTrackById(id), el.trackBPreview, "Track B");
+    } else if (el.trackBSelect) {
+      el.trackBSelect.value = String(id);
+      renderTransitionTrackPreview(getTrackById(id), el.trackBPreview, "Track B");
+    }
+  }
+
+  function openLocalTrackInAnalysis(trackId) {
+    const id = Number(trackId || 0);
+    if (!id) return;
+    const localTrack = getTrackById(id);
+    if (!localTrack) return;
+    state.analysisExternalTrack = null;
+    if (el.analysisTrackSelect) el.analysisTrackSelect.value = String(id);
+    prefillTransitionFromRecommendation(id);
+    renderAnalysis();
+    navigateTo("analysis");
+  }
+
   function getSessionSelectedTracks() {
     return (state.sessionBuilder.selectedTrackIds || []).map((id) => getTrackById(id)).filter(Boolean);
   }
@@ -2363,7 +2428,7 @@
     el.nowRecommendations.innerHTML = recs
       .map(
         (item) => `
-      <div class="track-card">
+      <div class="track-card" data-now-recommend-track="${item.track.id}" style="cursor:pointer;">
         <div style="font-weight:700">${esc(item.track.title)}</div>
         <div style="color:var(--text-secondary); font-size:0.84rem">${esc(item.track.artist)}</div>
         <div class="row" style="margin-top:8px;">
@@ -2456,7 +2521,7 @@
       .slice(0, 4)
       .map(
         (item) => `
-      <div class="live-next-row">
+      <div class="live-next-row" data-live-recommend-track="${item.track.id}" style="cursor:pointer;">
         <div>
           <strong>${esc(item.track.title)}</strong>
           <span>${esc(item.track.artist)} • ${Number(item.track.bpm).toFixed(2)} BPM • ${esc(item.track.camelot_key || item.track.musical_key || "-")}</span>
@@ -2577,9 +2642,9 @@
       ? state.ai.openaiConnected
         ? "OpenAI connecté"
         : "OpenAI configuré (test en attente)"
-      : "OpenAI optionnel (non requis)";
+      : "OpenAI optionnel";
     const internetText = state.ai?.internetEnrichment?.active ? "internet metadata actif" : "internet metadata off";
-    const aiText = `IA cloud connectée • moteur local ${state.ai.localModelActive ? "actif" : "off"} • ${openaiText} • ${internetText}`;
+    const aiText = `IA runtime actif • moteur local ${state.ai.localModelActive ? "actif" : "off"} • ${openaiText} • ${internetText}`;
     const aiStatus = state.ai.localModelActive ? "connected" : "disconnected";
     setStatusPill(el.socketStatus, el.socketStatusText, aiStatus, "AI", aiText);
 
@@ -2594,7 +2659,14 @@
     const wsLine = `Mode bridge: ${state.serato.mode}. Statut: ${state.serato.status}${
       state.serato.lastError ? ` (${state.serato.lastError})` : ""
     }${relayInfo}${desktopInfo}`;
-    el.wsStatusDetail.textContent = wsLine;
+    const updateInfo = state.desktopUpdate?.checkedAt
+      ? state.desktopUpdate.updateAvailable
+        ? ` • update v${state.desktopUpdate.latestVersion} disponible`
+        : state.desktopUpdate.error
+        ? ` • updates: ${state.desktopUpdate.error}`
+        : ` • version à jour (${state.desktopUpdate.currentVersion || "n/a"})`
+      : "";
+    el.wsStatusDetail.textContent = `${wsLine}${updateInfo}`;
   }
 
   async function refreshRecommendations() {
@@ -2705,13 +2777,52 @@
 
   async function scanLibrary() {
     const path = (el.libraryPathInput.value || "").trim();
-    if (!path) {
-      showToast("Saisis d'abord le chemin de ta bibliothèque.");
-      return;
-    }
-
-      el.scanStatus.innerHTML = `${typingIndicatorMarkup("Maya scanne et analyse les morceaux...")}`;
+    el.scanStatus.innerHTML = `${typingIndicatorMarkup("Maya scanne et analyse les morceaux...")}`;
     try {
+      if (desktopLibraryApi) {
+        const manifest = await desktopLibraryApi.scan({ rootPath: path, limit: 2600 });
+        state.desktopLibrary = {
+          available: true,
+          roots: manifest?.roots || [],
+          scanned: Number(manifest?.scanned || 0),
+          truncated: Boolean(manifest?.truncated),
+          lastError: String(manifest?.error || ""),
+        };
+        if (!manifest?.ok) {
+          throw new Error(manifest?.error || "Scan desktop impossible");
+        }
+        const tracks = Array.isArray(manifest?.tracks) ? manifest.tracks : [];
+        if (!tracks.length) {
+          el.scanStatus.textContent = "Aucun fichier audio trouvé sur ce poste.";
+          showToast("Aucun fichier audio détecté");
+          return;
+        }
+        const imported = await api("POST", "/api/library/import-manifest", {
+          source: "electron_desktop_scan",
+          tracks,
+        });
+        const created = Number(imported?.created || 0);
+        const updated = Number(imported?.updated || 0);
+        const skipped = Number(imported?.skipped || 0);
+        el.scanStatus.textContent = `Import desktop terminé: ${created} nouveaux • ${updated} mis à jour • ${skipped} ignorés${
+          imported?.truncated ? " • tronqué" : ""
+        }`;
+        await loadTracks();
+        await runUnifiedSearch();
+        await refreshRecommendations();
+        await refreshHistory();
+        await refreshAccountDashboard();
+        renderSessionBuilder();
+        showToast(`Bibliothèque desktop importée (${created + updated})`);
+        return;
+      }
+
+      if (!path) {
+        showToast("Saisis d'abord le chemin de ta bibliothèque.");
+        el.scanStatus.textContent = "Chemin requis pour le scan serveur.";
+        return;
+      }
+
       const start = await api("POST", "/api/library/scan", { path, recursive: true, limit: 0 });
       const jobId = start?.job?.id;
       if (!jobId) throw new Error("Création du job de scan impossible");
@@ -2722,10 +2833,10 @@
         const payload = await api("GET", `/api/library/scan/jobs/${encodeURIComponent(jobId)}`);
         const job = payload?.job;
         if (!job) throw new Error("Job de scan introuvable");
-        const progress = job.candidates
-          ? `${job.processed}/${job.candidates}`
-          : `${job.processed || 0}`;
-        el.scanStatus.textContent = `Scan ${job.status}: ${progress} fichiers • analysés ${job.analyzed || 0} • erreurs ${job.errors_count || 0}${job.truncated ? " • tronqué (limite sécurité)" : ""}`;
+        const progress = job.candidates ? `${job.processed}/${job.candidates}` : `${job.processed || 0}`;
+        el.scanStatus.textContent = `Scan ${job.status}: ${progress} fichiers • analysés ${job.analyzed || 0} • erreurs ${
+          job.errors_count || 0
+        }${job.truncated ? " • tronqué (limite sécurité)" : ""}`;
         if (job.status === "completed") {
           finalJob = job;
           break;
@@ -2758,13 +2869,13 @@
       state.lastAppleSyncAt = new Date().toISOString();
       setAppleSyncTimestamp(state.lastAppleSyncAt);
       const discovered = Number(payload?.uniqueExternalTracks || payload?.discovered || 0);
-      el.scanStatus.textContent = `Sync Apple Music terminée: ${discovered} morceaux externes mis à jour.`;
+      el.scanStatus.textContent = `Sync catalogue iTunes terminée: ${discovered} morceaux externes enrichis.`;
       await runUnifiedSearch();
       await refreshHistory();
       await refreshAccountDashboard();
-      showToast(`Sync Apple Music OK (${discovered})`);
+      showToast(`Sync catalogue iTunes OK (${discovered})`);
     } catch (error) {
-      showToast(`Sync Apple Music impossible: ${String(error.message || error)}`);
+      showToast(`Sync catalogue iTunes impossible: ${String(error.message || error)}`);
     } finally {
       if (el.appleSyncBtn) el.appleSyncBtn.disabled = false;
     }
@@ -3021,10 +3132,7 @@
       if (analyzeBtn) {
         const forcedId = analyzeBtn.getAttribute("data-local-analyze");
         if (forcedId) {
-          state.analysisExternalTrack = null;
-          el.analysisTrackSelect.value = forcedId;
-          renderAnalysis();
-          navigateTo("analysis");
+          openLocalTrackInAnalysis(forcedId);
         }
         return;
       }
@@ -3032,10 +3140,7 @@
       if (!card) return;
       const id = card.getAttribute("data-local-track-id");
       if (!id) return;
-      state.analysisExternalTrack = null;
-      el.analysisTrackSelect.value = id;
-      renderAnalysis();
-      navigateTo("analysis");
+      openLocalTrackInAnalysis(id);
     });
 
     on(el.globalResults, "click", async (event) => {
@@ -3105,6 +3210,16 @@
     });
     on(el.searchSubmitBtn, "click", runUnifiedSearch);
     on(el.appleSyncBtn, "click", syncAppleCatalog);
+    on(el.nowRecommendations, "click", (event) => {
+      const card = event.target.closest("[data-now-recommend-track]");
+      if (!card) return;
+      openLocalTrackInAnalysis(card.getAttribute("data-now-recommend-track"));
+    });
+    on(el.liveSuggestions, "click", (event) => {
+      const row = event.target.closest("[data-live-recommend-track]");
+      if (!row) return;
+      openLocalTrackInAnalysis(row.getAttribute("data-live-recommend-track"));
+    });
 
     [el.bpmFilterInput, el.keyFilterInput, el.energyFilterInput].filter(Boolean).forEach((input) => {
       input.addEventListener("input", () => {
@@ -3270,6 +3385,9 @@
     await refreshLiveCoach();
     await refreshHistory();
     await refreshAccountDashboard();
+    if (state.desktopSerato.available) {
+      await checkDesktopUpdates(false);
+    }
     renderTransitionResult(null);
     renderNowPlaying();
     renderAnalysis();

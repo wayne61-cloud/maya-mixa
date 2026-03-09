@@ -28,4 +28,10 @@ contextBridge.exposeInMainWorld('mayaDesktop', {
     stop: () => ipcRenderer.invoke('maya-serato-stop'),
     status: () => ipcRenderer.invoke('maya-serato-status'),
   },
+  library: {
+    scan: (payload = {}) => ipcRenderer.invoke('maya-library-scan', payload),
+  },
+  updates: {
+    check: () => ipcRenderer.invoke('maya-updates-check'),
+  },
 });

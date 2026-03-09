@@ -15,7 +15,7 @@ from collections import deque
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote_plus, urlencode, urlparse
 
 import httpx
@@ -86,7 +86,7 @@ APPLE_OAUTH_REDIRECT_URI = os.getenv("MAYA_APPLE_REDIRECT_URI", "").strip()
 AUTH_PASSWORDLESS = os.getenv("MAYA_AUTH_PASSWORDLESS", "true").strip().lower() in {"1", "true", "yes", "on"}
 SEED_NEW_USER_LIBRARY = os.getenv("MAYA_SEED_NEW_USER_LIBRARY", "false").strip().lower() in {"1", "true", "yes", "on"}
 SEED_BOOTSTRAP_ADMIN_LIBRARY = (
-    os.getenv("MAYA_SEED_BOOTSTRAP_ADMIN_LIBRARY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    os.getenv("MAYA_SEED_BOOTSTRAP_ADMIN_LIBRARY", "false").strip().lower() in {"1", "true", "yes", "on"}
 )
 
 
@@ -2497,6 +2497,104 @@ def external_track_to_local_payload(external: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def manifest_track_to_local_payload(item: Dict[str, Any], source: str = "desktop_manifest") -> Dict[str, Any]:
+    raw_path = str(item.get("file_path") or item.get("path") or "").strip()
+    title = str(item.get("title") or "").strip()
+    artist = str(item.get("artist") or "").strip()
+    album = str(item.get("album") or "").strip()
+
+    if raw_path:
+        guessed = Path(raw_path).stem.strip()
+        if not title and guessed:
+            if " - " in guessed:
+                left, right = guessed.split(" - ", 1)
+                if not artist:
+                    artist = left.strip()
+                title = right.strip()
+            else:
+                title = guessed
+
+    if not title:
+        title = "Unknown Track"
+    if not artist:
+        artist = "Unknown Artist"
+
+    canonical = re.sub(r"[^a-z0-9]+", "-", f"{artist}-{title}".lower()).strip("-") or "desktop-track"
+    file_path = raw_path or f"virtual://desktop-import/{canonical}.mp3"
+    file_hash = hashlib.sha1((str(item.get("file_hash") or "") or file_path).encode("utf-8")).hexdigest()
+    seed = hashlib.sha1(f"{file_path}|{artist}|{title}".encode("utf-8")).hexdigest()
+
+    def seed_ratio(offset: int = 0) -> float:
+        chunk = seed[offset : offset + 8] or seed[:8]
+        return int(chunk, 16) / 0xFFFFFFFF
+
+    bpm = item.get("bpm")
+    if bpm is None:
+        bpm = round(120.0 + seed_ratio(0) * 12.0, 2)
+    else:
+        bpm = float(bpm)
+
+    camelot = str(item.get("camelot_key") or "").strip().upper()
+    if not camelot:
+        candidates = ["6A", "7A", "8A", "9A", "10A", "8B", "9B", "10B", "11B", "12B"]
+        camelot = candidates[int(seed_ratio(8) * (len(candidates) - 1))]
+
+    musical_key = str(item.get("musical_key") or "").strip()
+    if not musical_key:
+        musical_key = "A minor" if camelot.endswith("A") else "C major"
+
+    energy = item.get("energy")
+    if energy is None:
+        energy = round(5.2 + seed_ratio(16) * 3.4, 2)
+    else:
+        energy = clamp(float(energy), 1.0, 10.0)
+
+    note = item.get("note")
+    if note is None:
+        note = round(5.6 + seed_ratio(24) * 3.2, 2)
+    else:
+        note = clamp(float(note), 1.0, 10.0)
+
+    duration = max(60.0, float(item.get("duration") or 360.0))
+    genre = str(item.get("genre") or "unknown").strip() or "unknown"
+    raw_tags = item.get("tags") or []
+    if isinstance(raw_tags, str):
+        tags = [part.strip() for part in raw_tags.split("|") if part.strip()]
+    else:
+        tags = [str(part).strip() for part in raw_tags if str(part).strip()]
+    tags = sorted(set(tags + ["desktop-import", source]))
+
+    features = dict(item.get("features") or {})
+    if not features:
+        features = {
+            "bass": round(4.8 + seed_ratio(4) * 3.8, 2),
+            "melodic": round(4.5 + seed_ratio(12) * 3.6, 2),
+            "percussion": round(4.6 + seed_ratio(20) * 3.9, 2),
+            "brightness": round(4.0 + seed_ratio(28) * 3.2, 2),
+            "groove": round(4.7 + seed_ratio(10) * 3.5, 2),
+            "danceability": round(5.2 + seed_ratio(18) * 3.2, 2),
+        }
+    features["analysis_confidence"] = clamp(float(features.get("analysis_confidence", 0.58)), 0.0, 1.0)
+    features["source"] = str(features.get("source") or source)
+
+    return {
+        "file_path": file_path,
+        "file_hash": file_hash,
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "duration": duration,
+        "bpm": bpm,
+        "musical_key": musical_key,
+        "camelot_key": camelot,
+        "energy": energy,
+        "note": note,
+        "genre": genre,
+        "tags": tags,
+        "features": features,
+    }
+
+
 class SeratoBridge:
     def __init__(self, db: Database, analyzer: AudioAnalyzer, user_id: Optional[int] = None) -> None:
         self.db = db
@@ -2534,8 +2632,9 @@ class SeratoBridge:
             self.state["lastError"] = ""
 
         if mode == "push":
+            # In push mode, we only become truly connected once payloads arrive.
             with self.lock:
-                self.state["status"] = "connected"
+                self.state["status"] = "connecting"
             self.db.add_event(
                 "serato.connect",
                 {"mode": mode, "ws_url": ws_url, "history_path": history_path, "feed_path": feed_path},
@@ -2593,6 +2692,27 @@ class SeratoBridge:
     def _touch_seen(self) -> None:
         with self.lock:
             self.state["lastSeen"] = now_iso()
+
+    def _normalize_deck_name(self, raw: Any, fallback: str = "A") -> str:
+        if isinstance(raw, (int, float)):
+            value = int(raw)
+            if value == 1:
+                return "A"
+            if value == 2:
+                return "B"
+            return fallback
+        value = str(raw or "").strip().upper()
+        if not value:
+            return fallback
+        if value in {"A", "DECKA", "DECK_A", "LEFT", "1", "DECK1"}:
+            return "A"
+        if value in {"B", "DECKB", "DECK_B", "RIGHT", "2", "DECK2"}:
+            return "B"
+        if value.endswith("A"):
+            return "A"
+        if value.endswith("B"):
+            return "B"
+        return fallback
 
     def _run_websocket_mode(self, ws_url: str) -> None:
         if not ws_url:
@@ -2679,17 +2799,29 @@ class SeratoBridge:
         except Exception:
             pass
 
+        deck_guess = "A"
+        deck_match = re.search(r"\bdeck\s*([ab12])\b", line, flags=re.IGNORECASE)
+        if not deck_match:
+            deck_match = re.search(r"^\s*[\[(]?([ab12])[\])\s:\-]+", line, flags=re.IGNORECASE)
+        if deck_match:
+            deck_guess = self._normalize_deck_name(deck_match.group(1), fallback="A")
+
+        cleaned = re.sub(r"\bdeck\s*[ab12]\b[:\-\s]*", "", line, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"^\s*[\[(]?[ab12][\])\s:\-]+", "", cleaned, flags=re.IGNORECASE).strip()
+        if not cleaned:
+            cleaned = line
+
         artist = ""
         title = ""
-        if " - " in line:
-            left, right = line.split(" - ", 1)
+        if " - " in cleaned:
+            left, right = cleaned.split(" - ", 1)
             artist = left.strip()
             title = right.strip()
         else:
-            title = line[:200]
+            title = cleaned[:200]
             artist = "Unknown Artist"
 
-        payload["deck"] = "A"
+        payload["deck"] = deck_guess
         payload["track"] = {
             "title": title,
             "artist": artist,
@@ -2706,7 +2838,7 @@ class SeratoBridge:
                 self._update_deck("B", payload["deckB"], source)
             return
 
-        deck_name = payload.get("deck", "A")
+        deck_name = self._normalize_deck_name(payload.get("deck", "A"), fallback="A")
         track = payload.get("track", payload)
         self._update_deck(deck_name, track, source)
 
@@ -2714,7 +2846,7 @@ class SeratoBridge:
         if not isinstance(payload, dict):
             raise ValueError("Payload must be an object")
         with self.lock:
-            if self.state.get("status") in {"disconnected", "error"}:
+            if self.state.get("status") in {"disconnected", "error", "connecting"}:
                 self.state["status"] = "connected"
             if self.state.get("mode") in {"none", ""}:
                 self.state["mode"] = "push"
@@ -3118,6 +3250,11 @@ class ScanRequest(BaseModel):
     path: str = Field(..., description="Directory or file path")
     recursive: bool = True
     limit: int = 0
+
+
+class LibraryImportManifestRequest(BaseModel):
+    tracks: List[Dict[str, Any]] = Field(default_factory=list)
+    source: str = "desktop_manifest"
 
 
 class TransitionRequest(BaseModel):
@@ -4046,6 +4183,76 @@ def library_scan_job_status(job_id: str, user: Dict[str, Any] = Depends(get_curr
     if not job:
         raise HTTPException(status_code=404, detail="Scan job not found")
     return {"job": job}
+
+
+@app.post("/api/library/import-manifest")
+def library_import_manifest(payload: LibraryImportManifestRequest, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    raw_tracks = payload.tracks or []
+    if not raw_tracks:
+        raise HTTPException(status_code=400, detail="tracks is required")
+
+    user_id = int(user["id"])
+    source = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(payload.source or "desktop_manifest")).strip("-") or "desktop_manifest"
+    max_rows = 5000
+    rows = raw_tracks[:max_rows]
+    truncated = len(raw_tracks) > max_rows
+
+    created = 0
+    updated = 0
+    linked = 0
+    skipped = 0
+    errors: List[Dict[str, Any]] = []
+    seen_paths: Set[str] = set()
+
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            skipped += 1
+            continue
+        try:
+            local_payload = manifest_track_to_local_payload(row, source=source)
+            file_path = str(local_payload.get("file_path") or "").strip()
+            if not file_path or file_path in seen_paths:
+                skipped += 1
+                continue
+            seen_paths.add(file_path)
+            existed = db.get_track_by_path(file_path)
+            saved = db.upsert_track(local_payload)
+            db.link_user_track(user_id, int(saved["id"]))
+            linked += 1
+            if existed:
+                updated += 1
+            else:
+                created += 1
+        except Exception as exc:  # noqa: BLE001
+            skipped += 1
+            if len(errors) < 8:
+                errors.append({"index": idx, "error": str(exc)})
+
+    db.add_event(
+        "library.import_manifest",
+        {
+            "source": source,
+            "requested": len(raw_tracks),
+            "processed": len(rows),
+            "created": created,
+            "updated": updated,
+            "linked": linked,
+            "skipped": skipped,
+            "truncated": truncated,
+        },
+        user_id=user_id,
+    )
+    return {
+        "source": source,
+        "requested": len(raw_tracks),
+        "processed": len(rows),
+        "created": created,
+        "updated": updated,
+        "linked": linked,
+        "skipped": skipped,
+        "truncated": truncated,
+        "errors": errors,
+    }
 
 
 @app.get("/api/library/tracks")

@@ -25,6 +25,34 @@ function expandHome(inputPath) {
   return value;
 }
 
+const AUDIO_EXTENSIONS = new Set([
+  '.mp3',
+  '.wav',
+  '.aiff',
+  '.aif',
+  '.flac',
+  '.m4a',
+  '.aac',
+  '.ogg',
+  '.opus',
+]);
+
+function normalizeDeckLabel(raw, fallback = 'A') {
+  if (raw === undefined || raw === null) return fallback;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    if (Number(raw) === 1) return 'A';
+    if (Number(raw) === 2) return 'B';
+    return fallback;
+  }
+  const text = String(raw).trim().toUpperCase();
+  if (!text) return fallback;
+  if (['A', 'DECKA', 'DECK_A', 'LEFT', '1', 'DECK1'].includes(text)) return 'A';
+  if (['B', 'DECKB', 'DECK_B', 'RIGHT', '2', 'DECK2'].includes(text)) return 'B';
+  if (text.endsWith('A')) return 'A';
+  if (text.endsWith('B')) return 'B';
+  return fallback;
+}
+
 function walkFiles(root, out = []) {
   let entries = [];
   try {
@@ -43,33 +71,118 @@ function walkFiles(root, out = []) {
   return out;
 }
 
+function collectAudioManifest(rootPath, limit = 1200) {
+  const tracks = [];
+  const maxItems = Math.max(1, Math.min(Number(limit) || 1200, 6000));
+  const stack = [rootPath];
+  while (stack.length && tracks.length < maxItems) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!AUDIO_EXTENSIONS.has(ext)) continue;
+      const baseName = path.basename(entry.name, ext).trim();
+      let artist = 'Unknown Artist';
+      let title = baseName || 'Unknown Track';
+      if (baseName.includes(' - ')) {
+        const parts = baseName.split(' - ');
+        if (parts.length >= 2) {
+          artist = parts[0].trim() || artist;
+          title = parts.slice(1).join(' - ').trim() || title;
+        }
+      }
+      tracks.push({
+        file_path: full,
+        title,
+        artist,
+      });
+      if (tracks.length >= maxItems) break;
+    }
+  }
+  return tracks;
+}
+
+function resolveLibraryScanRoots(preferredRoot = '') {
+  const runtimeConfig = readRuntimeConfig();
+  const fromConfig = []
+    .concat(runtimeConfig.libraryScanRoots || [])
+    .concat(runtimeConfig.libraryPath || [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  const candidates = [];
+  if (preferredRoot) candidates.push(preferredRoot);
+  candidates.push(...fromConfig);
+  candidates.push(
+    '~/Music',
+    '~/Music/Music',
+    '~/Music/iTunes',
+    '~/Documents/Music'
+  );
+  const resolved = Array.from(new Set(candidates.map((item) => path.resolve(expandHome(item)))));
+  return resolved.filter((item) => {
+    try {
+      return fs.existsSync(item) && fs.statSync(item).isDirectory();
+    } catch (_) {
+      return false;
+    }
+  });
+}
+
 function parseHistoryLine(line) {
   const clean = String(line || '').trim();
   if (!clean) return null;
   try {
     const maybe = JSON.parse(clean);
-    if (maybe && typeof maybe === 'object') return maybe;
+    if (maybe && typeof maybe === 'object') {
+      if (maybe.deckA || maybe.deckB) return maybe;
+      const track = maybe.track && typeof maybe.track === 'object' ? maybe.track : maybe;
+      return {
+        deck: normalizeDeckLabel(maybe.deck || maybe.deck_id || maybe.deckIndex || maybe.channel, 'A'),
+        track,
+      };
+    }
   } catch (_) {
     // Ignore and continue fallback parser.
   }
 
-  if (clean.includes(' - ')) {
-    const [artist, ...rest] = clean.split(' - ');
+  let deckHint = '';
+  const deckToken = clean.match(/\bdeck\s*([ab12])\b/i) || clean.match(/^\s*[\[(]?([ab12])[\])\s:\-]+/i);
+  if (deckToken) {
+    deckHint = normalizeDeckLabel(deckToken[1], '');
+  }
+  const withoutDeck = clean
+    .replace(/\bdeck\s*[ab12]\b[:\-\s]*/i, '')
+    .replace(/^\s*[\[(]?[ab12][\])\s:\-]+/i, '')
+    .trim();
+  const source = withoutDeck || clean;
+  if (source.includes(' - ')) {
+    const [artist, ...rest] = source.split(' - ');
     const title = rest.join(' - ').trim();
     return {
-      deck: 'A',
+      deck: deckHint || undefined,
       track: {
         artist: artist.trim() || 'Unknown Artist',
-        title: title || clean.slice(0, 180),
+        title: title || source.slice(0, 180),
       },
     };
   }
 
   return {
-    deck: 'A',
+    deck: deckHint || undefined,
     track: {
       artist: 'Unknown Artist',
-      title: clean.slice(0, 180),
+      title: source.slice(0, 180),
     },
   };
 }
@@ -112,6 +225,7 @@ const seratoRelay = {
   fileOffsets: new Map(),
   lastPushAt: null,
   lastError: '',
+  lastDeckHint: 'B',
 };
 
 function relayStatus() {
@@ -163,6 +277,31 @@ function latestHistoryFile(historyRoot) {
   return files[0] || '';
 }
 
+function nextDeckHint() {
+  seratoRelay.lastDeckHint = seratoRelay.lastDeckHint === 'A' ? 'B' : 'A';
+  return seratoRelay.lastDeckHint;
+}
+
+function withDeckFallback(payload, rawLine = '') {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.deckA || payload.deckB) return payload;
+  const explicit = normalizeDeckLabel(payload.deck, '');
+  if (explicit) {
+    payload.deck = explicit;
+    seratoRelay.lastDeckHint = explicit;
+    return payload;
+  }
+  const token = String(rawLine || '').match(/\bdeck\s*([ab12])\b/i) || String(rawLine || '').match(/^\s*[\[(]?([ab12])[\])\s:\-]+/i);
+  const lineGuess = token ? normalizeDeckLabel(token[1], '') : '';
+  if (lineGuess) {
+    payload.deck = lineGuess;
+    seratoRelay.lastDeckHint = lineGuess;
+    return payload;
+  }
+  payload.deck = nextDeckHint();
+  return payload;
+}
+
 async function relayTick() {
   if (!seratoRelay.active || seratoRelay.tickBusy) return;
   seratoRelay.tickBusy = true;
@@ -193,21 +332,24 @@ async function relayTick() {
       return;
     }
 
-    if (!seratoRelay.fileOffsets.has(latest)) {
-      seratoRelay.fileOffsets.set(latest, content.length);
-      seratoRelay.lastError = '';
-      return;
-    }
-
-    const prevOffset = Number(seratoRelay.fileOffsets.get(latest) || 0);
-    const safeOffset = Math.min(prevOffset, content.length);
-    const delta = content.slice(safeOffset);
-    seratoRelay.fileOffsets.set(latest, content.length);
-
-    const lines = delta
+    const allLines = content
       .split(/\r?\n/g)
       .map((line) => line.trim())
       .filter(Boolean);
+    let lines = [];
+    if (!seratoRelay.fileOffsets.has(latest)) {
+      seratoRelay.fileOffsets.set(latest, content.length);
+      lines = allLines.slice(-24);
+    } else {
+      const prevOffset = Number(seratoRelay.fileOffsets.get(latest) || 0);
+      const safeOffset = Math.min(prevOffset, content.length);
+      const delta = content.slice(safeOffset);
+      seratoRelay.fileOffsets.set(latest, content.length);
+      lines = delta
+        .split(/\r?\n/g)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    }
 
     if (!lines.length) {
       seratoRelay.lastError = '';
@@ -217,9 +359,11 @@ async function relayTick() {
     for (const line of lines) {
       const payload = parseHistoryLine(line);
       if (!payload) continue;
+      const normalized = withDeckFallback(payload, line);
+      if (!normalized) continue;
       await relayApi('POST', '/api/serato/push', {
         source: 'electron_serato_history_auto',
-        payload,
+        payload: normalized,
       });
       seratoRelay.lastPushAt = new Date().toISOString();
     }
@@ -260,6 +404,7 @@ async function startSeratoRelay(options = {}) {
   seratoRelay.lastError = '';
   seratoRelay.lastPushAt = null;
   seratoRelay.fileOffsets = new Map();
+  seratoRelay.lastDeckHint = 'B';
 
   seratoRelay.timer = setInterval(() => {
     void relayTick();
@@ -277,6 +422,7 @@ async function stopSeratoRelay(options = {}) {
   seratoRelay.active = false;
   seratoRelay.tickBusy = false;
   seratoRelay.fileOffsets = new Map();
+  seratoRelay.lastDeckHint = 'B';
 
   if (disconnect && seratoRelay.apiBase && seratoRelay.token) {
     try {
@@ -291,9 +437,125 @@ async function stopSeratoRelay(options = {}) {
   return relayStatus();
 }
 
+async function scanLocalLibrary(options = {}) {
+  const preferredRoot = String(options.rootPath || '').trim();
+  const roots = resolveLibraryScanRoots(preferredRoot);
+  if (!roots.length) {
+    return {
+      ok: false,
+      roots,
+      scanned: 0,
+      truncated: false,
+      tracks: [],
+      error: 'Aucun dossier musique local trouvé',
+    };
+  }
+  const limit = Math.max(1, Math.min(Number(options.limit) || 2000, 6000));
+  const tracks = [];
+  let truncated = false;
+  for (const root of roots) {
+    if (tracks.length >= limit) break;
+    const remaining = limit - tracks.length;
+    const subset = collectAudioManifest(root, remaining);
+    tracks.push(...subset);
+    if (tracks.length >= limit) {
+      truncated = true;
+      break;
+    }
+  }
+  const unique = [];
+  const seen = new Set();
+  for (const row of tracks) {
+    const key = String(row.file_path || '').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(row);
+  }
+  return {
+    ok: true,
+    roots,
+    scanned: unique.length,
+    truncated,
+    tracks: unique,
+  };
+}
+
+function versionParts(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^v/i, '')
+    .split('.')
+    .map((part) => Number.parseInt(part, 10))
+    .filter((part) => Number.isFinite(part));
+}
+
+function compareVersions(left, right) {
+  const a = versionParts(left);
+  const b = versionParts(right);
+  const len = Math.max(a.length, b.length, 3);
+  for (let i = 0; i < len; i += 1) {
+    const av = Number(a[i] || 0);
+    const bv = Number(b[i] || 0);
+    if (av > bv) return 1;
+    if (av < bv) return -1;
+  }
+  return 0;
+}
+
+async function checkDesktopUpdates() {
+  const runtimeConfig = readRuntimeConfig();
+  const repo = String(process.env.MAYA_UPDATES_REPO || runtimeConfig.updatesRepo || 'wayne61-cloud/maya-mixa').trim();
+  const currentVersion = app.getVersion();
+  if (!repo.includes('/')) {
+    return {
+      ok: false,
+      repo,
+      currentVersion,
+      updateAvailable: false,
+      error: 'updatesRepo invalide',
+    };
+  }
+  try {
+    const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'maya-mixa-desktop',
+      },
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`GitHub ${response.status} ${body.slice(0, 120)}`);
+    }
+    const release = await response.json();
+    const latestVersion = String(release.tag_name || release.name || '').trim().replace(/^v/i, '');
+    if (!latestVersion) throw new Error('Aucune version latest trouvée');
+    const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+    return {
+      ok: true,
+      repo,
+      currentVersion,
+      latestVersion,
+      updateAvailable,
+      releaseUrl: String(release.html_url || ''),
+      checkedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      repo,
+      currentVersion,
+      updateAvailable: false,
+      error: String(error.message || error),
+      checkedAt: new Date().toISOString(),
+    };
+  }
+}
+
 ipcMain.handle('maya-serato-start', async (_event, payload) => startSeratoRelay(payload || {}));
 ipcMain.handle('maya-serato-stop', async () => stopSeratoRelay({ disconnect: true }));
 ipcMain.handle('maya-serato-status', async () => relayStatus());
+ipcMain.handle('maya-library-scan', async (_event, payload) => scanLocalLibrary(payload || {}));
+ipcMain.handle('maya-updates-check', async () => checkDesktopUpdates());
 
 function createMainWindow() {
   const appIcon = path.join(__dirname, '..', 'assets', 'icons', 'maya-icon-512.png');
