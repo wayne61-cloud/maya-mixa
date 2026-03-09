@@ -2,6 +2,9 @@
   const AUTH_TOKEN_KEY = "maya_mixa_auth_token";
   const API_BASE_KEY = "maya_mixa_api_base";
   const APPLE_SYNC_KEY = "maya_mixa_apple_sync_at";
+  const BOOT_LOADER_MIN_MS = 950;
+  const BOOT_LOADER_MAX_MS = 7000;
+  const bootStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
   const runtimeConfig = (() => {
     const inlineConfig = (typeof window !== "undefined" && window.__MAYA_CONFIG__) || {};
     const electronConfig = (typeof window !== "undefined" && window.mayaConfig) || {};
@@ -193,6 +196,7 @@
     liveSuggestions: document.getElementById("liveSuggestions"),
 
     authGate: document.getElementById("authGate"),
+    bootLoader: document.getElementById("bootLoader"),
     authLoginTab: document.getElementById("authLoginTab"),
     authRegisterTab: document.getElementById("authRegisterTab"),
     authLoginForm: document.getElementById("authLoginForm"),
@@ -268,6 +272,23 @@
       return message || "Unknown error";
     }
     return message || "Unknown error";
+  }
+
+  function dismissBootLoader(force = false) {
+    const node = el.bootLoader;
+    if (!node || node.dataset.dismissed === "1") return;
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const elapsed = now - bootStartedAt;
+    const wait = force ? 0 : Math.max(0, BOOT_LOADER_MIN_MS - elapsed);
+    clearTimeout(dismissBootLoader.timer);
+    dismissBootLoader.timer = setTimeout(() => {
+      node.dataset.dismissed = "1";
+      node.classList.add("hide");
+      setTimeout(() => {
+        node.classList.remove("active");
+        node.setAttribute("aria-hidden", "true");
+      }, 280);
+    }, wait);
   }
 
   function humanizeError(error, fallback = "Impossible de joindre le backend. Vérifie internet et l'URL API.") {
@@ -2861,31 +2882,39 @@
   }
 
   async function initialLoad() {
-    bindEvents();
-    bootstrapApiBaseFromUrl();
-    updateApiConfigUi();
-    setSearchTab("local");
-    await refreshAuthSettings();
-    await refreshOAuthProviders();
-    setAuthTab("login");
-    bootstrapOAuthFromUrl();
-    bootstrapResetFromUrl();
+    setTimeout(() => dismissBootLoader(true), BOOT_LOADER_MAX_MS);
+    try {
+      bindEvents();
+      bootstrapApiBaseFromUrl();
+      updateApiConfigUi();
+      setSearchTab("local");
+      await refreshAuthSettings();
+      await refreshOAuthProviders();
+      setAuthTab("login");
+      bootstrapOAuthFromUrl();
+      bootstrapResetFromUrl();
 
-    const authenticated = await bootstrapAuth();
-    if (authenticated) {
-      navigateTo("now-playing");
-      try {
-        await loadAuthorizedData();
-        await maybeAutoSyncAppleCatalog();
-        startPollers();
-      } catch (error) {
-        console.error(error);
-        showToast("Backend indisponible. Vérifie la connexion cloud.");
+      const authenticated = await bootstrapAuth();
+      if (authenticated) {
+        navigateTo("now-playing");
+        try {
+          await loadAuthorizedData();
+          await maybeAutoSyncAppleCatalog();
+          startPollers();
+        } catch (error) {
+          console.error(error);
+          showToast("Backend indisponible. Vérifie la connexion cloud.");
+        }
+      } else {
+        lockAppUi(true);
+        navigateTo("now-playing");
+        stopPollers();
       }
-    } else {
-      lockAppUi(true);
-      navigateTo("now-playing");
-      stopPollers();
+    } catch (error) {
+      console.error(error);
+      showToast("Initialisation impossible. Recharge l'application.");
+    } finally {
+      dismissBootLoader(false);
     }
   }
 
