@@ -3325,7 +3325,31 @@
     } catch (error) {
       console.error(error);
       stopSeratoRelay();
-      showToast(`Connexion bridge impossible: ${String(error.message || error)}`);
+      const errorText = String(error.message || error || "Erreur inconnue");
+      let fallbackConnected = false;
+      if (selectedMode === "relay_websocket") {
+        try {
+          state.serato = await api("POST", "/api/serato/connect", {
+            mode: "push",
+            ws_url: "",
+            history_path: "",
+            feed_path: "",
+          });
+          updateTopStatus();
+          fallbackConnected = true;
+          if (el.wsStatusDetail) {
+            el.wsStatusDetail.textContent =
+              "Bridge cloud connecté, mais relais local Serato introuvable. Ouvre l'app desktop Maya Mixa pour la synchro auto.";
+          }
+        } catch (_) {
+          fallbackConnected = false;
+        }
+      }
+      if (fallbackConnected) {
+        showToast("Bridge partiel actif. Pour la synchro Serato live automatique, utilise l'app desktop Maya Mixa.");
+      } else {
+        showToast(`Connexion bridge impossible: ${errorText}`);
+      }
     }
   }
 
