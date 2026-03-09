@@ -254,6 +254,14 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def validate_login_identifier(identifier: str) -> bool:
     value = normalize_email(identifier or "")
     if not value:
@@ -3101,14 +3109,22 @@ class ExternalListItemUpdateRequest(BaseModel):
 
 
 class AuthRegisterRequest(BaseModel):
-    email: str
+    email: str = ""
+    loginId: str = ""
+    login_id: str = ""
+    identifier: str = ""
     password: str = ""
-    display_name: str
+    display_name: str = ""
+    displayName: str = ""
     dj_name: str = ""
+    djName: str = ""
 
 
 class AuthLoginRequest(BaseModel):
-    email: str
+    email: str = ""
+    loginId: str = ""
+    login_id: str = ""
+    identifier: str = ""
     password: str = ""
 
 
@@ -3557,7 +3573,9 @@ def auth_config() -> Dict[str, Any]:
 
 @app.post("/api/auth/register")
 def auth_register(payload: AuthRegisterRequest, request: Request) -> Dict[str, Any]:
-    login_id = normalize_email(payload.email)
+    login_id = normalize_email(
+        first_non_empty(payload.email, payload.loginId, payload.login_id, payload.identifier)
+    )
     client_ip = request.client.host if request.client else "unknown"
     enforce_rate_limit("auth_register_ip", client_ip, max_hits=20, window_seconds=60)
     enforce_rate_limit("auth_register_email", login_id or "unknown", max_hits=5, window_seconds=60 * 10)
@@ -3567,10 +3585,10 @@ def auth_register(payload: AuthRegisterRequest, request: Request) -> Dict[str, A
         raise HTTPException(status_code=400, detail="Invalid email")
     if not AUTH_PASSWORDLESS and len(payload.password or "") < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-    display_name = payload.display_name.strip()
+    display_name = first_non_empty(payload.display_name, payload.displayName, payload.dj_name, payload.djName)
     if not display_name:
         raise HTTPException(status_code=400, detail="display_name is required")
-    dj_name = payload.dj_name.strip() or display_name
+    dj_name = first_non_empty(payload.dj_name, payload.djName, display_name)
     if db.get_user_by_email(login_id):
         raise HTTPException(status_code=409, detail="Login already registered")
 
@@ -3620,7 +3638,9 @@ def auth_register(payload: AuthRegisterRequest, request: Request) -> Dict[str, A
 
 @app.post("/api/auth/login")
 def auth_login(payload: AuthLoginRequest, request: Request) -> Dict[str, Any]:
-    login_id = normalize_email(payload.email)
+    login_id = normalize_email(
+        first_non_empty(payload.email, payload.loginId, payload.login_id, payload.identifier)
+    )
     client_ip = request.client.host if request.client else "unknown"
     enforce_rate_limit("auth_login_ip", client_ip, max_hits=30, window_seconds=60)
     enforce_rate_limit("auth_login_email", login_id or "unknown", max_hits=10, window_seconds=60 * 5)

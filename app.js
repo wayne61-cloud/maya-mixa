@@ -267,6 +267,13 @@
     return message || "Unknown error";
   }
 
+  function humanizeError(error, fallback = "Impossible de joindre le backend. Vérifie internet et l'URL API.") {
+    const message = String(error?.message || error || "").trim();
+    if (!message) return fallback;
+    if (/load failed|failed to fetch|networkerror|typeerror/i.test(message)) return fallback;
+    return message;
+  }
+
   function lockAppUi(locked) {
     state.auth.locked = Boolean(locked);
     document.body.classList.toggle("auth-locked", state.auth.locked);
@@ -549,7 +556,7 @@
       await refreshOAuthProviders();
       updateApiConfigUi();
     } catch (error) {
-      setAuthFeedback(String(error.message || error), "error");
+      setAuthFeedback(humanizeError(error), "error");
       updateApiConfigUi();
     } finally {
       if (el.apiBaseTestBtn) el.apiBaseTestBtn.disabled = false;
@@ -866,7 +873,7 @@
     }
     el.loginSubmitBtn.disabled = true;
     try {
-      const payload = await api("POST", "/api/auth/login", { email, password }, { auth: false });
+      const payload = await api("POST", "/api/auth/login", { email, loginId: email, identifier: email, password }, { auth: false });
       persistAuthToken(payload.token || "");
       setCurrentUser(payload.user || null);
       lockAppUi(false);
@@ -877,7 +884,7 @@
       startPollers();
       showToast(`Bienvenue ${state.auth.user?.dj_name || state.auth.user?.display_name || ""}`.trim());
     } catch (error) {
-      setAuthFeedback(String(error.message || error), "error");
+      setAuthFeedback(humanizeError(error, "Connexion impossible. Vérifie ton ID DJ et la connexion backend."), "error");
     } finally {
       el.loginSubmitBtn.disabled = false;
     }
@@ -913,9 +920,13 @@
         "/api/auth/register",
         {
           email,
+          loginId: email,
+          identifier: email,
           password,
           display_name: displayName,
+          displayName,
           dj_name: djName,
+          djName,
         },
         { auth: false }
       );
@@ -929,7 +940,7 @@
       startPollers();
       showToast("Compte DJ créé");
     } catch (error) {
-      setAuthFeedback(String(error.message || error), "error");
+      setAuthFeedback(humanizeError(error, "Inscription impossible. Vérifie que l'ID DJ est unique."), "error");
     } finally {
       el.registerSubmitBtn.disabled = false;
     }
@@ -980,7 +991,7 @@
         showToast("Si le compte existe, le reset a été envoyé");
       }
     } catch (error) {
-      setAuthFeedback(String(error.message || error), "error");
+      setAuthFeedback(humanizeError(error), "error");
     } finally {
       el.forgotSubmitBtn.disabled = false;
     }
@@ -1019,7 +1030,7 @@
       setAuthFeedback("Mot de passe réinitialisé. Connecte-toi avec le nouveau.", "success");
       showToast("Mot de passe réinitialisé");
     } catch (error) {
-      setAuthFeedback(String(error.message || error), "error");
+      setAuthFeedback(humanizeError(error), "error");
     } finally {
       el.resetSubmitBtn.disabled = false;
     }

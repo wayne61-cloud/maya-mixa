@@ -8,6 +8,10 @@ function parseArgs(argv) {
   const out = {
     api: "",
     token: "",
+    login: "",
+    password: "",
+    djName: "",
+    autoRegister: true,
     history: "",
     intervalMs: 1500,
     verbose: false,
@@ -25,6 +29,21 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (key === "--login" && value) {
+      out.login = String(value);
+      i += 1;
+      continue;
+    }
+    if (key === "--password" && value) {
+      out.password = String(value);
+      i += 1;
+      continue;
+    }
+    if (key === "--dj-name" && value) {
+      out.djName = String(value);
+      i += 1;
+      continue;
+    }
     if (key === "--history" && value) {
       out.history = String(value);
       i += 1;
@@ -38,6 +57,9 @@ function parseArgs(argv) {
     }
     if (key === "--verbose") {
       out.verbose = true;
+    }
+    if (key === "--no-auto-register") {
+      out.autoRegister = false;
     }
   }
   return out;
@@ -103,12 +125,12 @@ function parseHistoryLine(line) {
 }
 
 async function apiJson(base, token, method, route, payload) {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (payload !== undefined) headers["Content-Type"] = "application/json";
   const res = await fetch(`${base}${route}`, {
     method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers,
     body: payload === undefined ? undefined : JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -124,15 +146,51 @@ async function apiJson(base, token, method, route, payload) {
   }
 }
 
+async function resolveAuthToken(base, args) {
+  const explicitToken = String(args.token || "").trim();
+  if (explicitToken) return explicitToken;
+
+  const login = String(args.login || "").trim().toLowerCase();
+  if (!login) return "";
+  const password = String(args.password || "");
+
+  try {
+    const loginPayload = await apiJson(base, "", "POST", "/api/auth/login", {
+      email: login,
+      loginId: login,
+      identifier: login,
+      password,
+    });
+    if (loginPayload?.token) return String(loginPayload.token);
+  } catch (_) {
+    // Try auto-register next when enabled.
+  }
+
+  if (!args.autoRegister) return "";
+
+  const displayName = String(args.djName || login).trim() || login;
+  const registerPayload = await apiJson(base, "", "POST", "/api/auth/register", {
+    email: login,
+    loginId: login,
+    identifier: login,
+    password,
+    display_name: displayName,
+    displayName: displayName,
+    dj_name: displayName,
+    djName: displayName,
+  });
+  return String(registerPayload?.token || "");
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const base = normalizeBase(args.api);
-  const token = String(args.token || "").trim();
   const historyPath = path.resolve(expandHome(args.history));
+  const token = await resolveAuthToken(base, args);
 
-  if (!base || !token || !historyPath) {
+  if (!base || !historyPath || !token) {
     console.error(
-      "Usage: node scripts/serato-history-push.mjs --api https://maya-mixa-cloud.onrender.com --token <AUTH_TOKEN> --history ~/Music/_Serato_/History/Sessions [--interval 1500] [--verbose]"
+      "Usage: node scripts/serato-history-push.mjs --api https://maya-mixa-cloud.onrender.com --history ~/Music/_Serato_/History/Sessions (--token <AUTH_TOKEN> | --login <ID_DJ>) [--password <pwd>] [--dj-name <name>] [--no-auto-register] [--interval 1500] [--verbose]"
     );
     process.exit(1);
   }
@@ -144,6 +202,9 @@ async function main() {
 
   await apiJson(base, token, "POST", "/api/serato/connect", { mode: "push" });
   console.log(`Connected push bridge -> ${base}`);
+  if (args.login) {
+    console.log(`Authenticated as: ${String(args.login).trim().toLowerCase()}`);
+  }
   console.log(`Watching Serato history folder: ${historyPath}`);
 
   const fileOffsets = new Map();

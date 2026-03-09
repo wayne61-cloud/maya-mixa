@@ -1623,15 +1623,15 @@
       <form class="auth-form" id="authLoginForm">
         <div class="flex-column"><label for="loginEmailInput" id="loginIdentifierLabel">Identifiant</label></div>
         <div class="inputForm">
-          <input class="input" id="loginEmailInput" type="text" placeholder="Email ou ID admin" autocomplete="username" required />
+          <input class="input" id="loginEmailInput" type="text" placeholder="ID DJ (ex: dj_hive_01)" autocomplete="username" required />
         </div>
-        <div id="loginPasswordFields">
+        <div class="hidden" id="loginPasswordFields">
           <div class="flex-column"><label for="loginPasswordInput">Mot de passe</label></div>
           <div class="inputForm">
             <input class="input" id="loginPasswordInput" type="password" placeholder="Mot de passe" autocomplete="current-password" required />
           </div>
         </div>
-        <div class="flex-row" id="forgotPasswordRow">
+        <div class="flex-row hidden" id="forgotPasswordRow">
           <button class="span" id="forgotPasswordBtn" type="button">Mot de passe oublié ?</button>
         </div>
         <button class="button-submit" id="loginSubmitBtn" type="submit">Ouvrir mon profil DJ</button>
@@ -1661,11 +1661,11 @@
         <div class="inputForm">
           <input class="input" id="registerDjNameInput" type="text" placeholder="Nom DJ" required />
         </div>
-        <div class="flex-column"><label for="registerEmailInput" id="registerIdentifierLabel">Email</label></div>
+        <div class="flex-column"><label for="registerEmailInput" id="registerIdentifierLabel">ID de connexion DJ</label></div>
         <div class="inputForm">
-          <input class="input" id="registerEmailInput" type="email" placeholder="Email" autocomplete="email" required />
+          <input class="input" id="registerEmailInput" type="text" placeholder="ID DJ unique (ex: dj_maya)" autocomplete="username" required />
         </div>
-        <div id="registerPasswordFields">
+        <div class="hidden" id="registerPasswordFields">
           <div class="flex-column"><label for="registerPasswordInput">Mot de passe</label></div>
           <div class="inputForm">
             <input class="input" id="registerPasswordInput" type="password" placeholder="Mot de passe (8+ caractères)" autocomplete="new-password" required />

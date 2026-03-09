@@ -230,17 +230,22 @@ Real native Serato deck telemetry still requires a local adapter/feed running on
 
 ### Cloud relay quick start (for a remote client)
 
-1. DJ logs in to Maya Mixa (passwordless) and copies the auth token from DevTools/local storage (`maya_mixa_auth_token`).
-2. Run the local relay on the DJ machine:
+1. Run the local relay on the DJ machine (no DevTools token copy required):
 
 ```bash
 npm run serato:history:push -- \
   --api https://YOUR-API-DOMAIN \
-  --token YOUR_AUTH_TOKEN \
+  --login dj_client_id \
   --history "~/Music/_Serato_/History/Sessions"
 ```
 
-3. The script auto-connects bridge mode `push`; in the app you should then see Serato status become `connected`.
+2. The script auto-connects bridge mode `push`; in the app you should then see Serato status become `connected`.
+
+Optional:
+
+- `--token YOUR_AUTH_TOKEN` if you want to pass an existing token
+- `--no-auto-register` to forbid automatic account creation when login does not exist
+- `--dj-name "DJ Name"` used only when auto-register creates the account
 
 This allows cloud backend + local Serato data without giving cloud direct filesystem access.
 
