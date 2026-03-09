@@ -1,5 +1,6 @@
 (() => {
   const AUTH_TOKEN_KEY = "maya_mixa_auth_token";
+  const LAST_LOGIN_ID_KEY = "maya_mixa_last_login_id";
   const API_BASE_KEY = "maya_mixa_api_base";
   const APPLE_SYNC_KEY = "maya_mixa_apple_sync_at";
   const DEFAULT_CLOUD_API_BASE = "https://maya-mixa-cloud.onrender.com";
@@ -43,6 +44,7 @@
       users: [],
       mode: "login",
       locked: true,
+      autoLoginAttempted: false,
       oauth: {
         google: { configured: false, start_url: "/api/auth/oauth/google/start" },
         apple: { configured: false, start_url: "/api/auth/oauth/apple/start" },
@@ -421,6 +423,31 @@
     }
   }
 
+  function getRememberedLoginId() {
+    try {
+      return String(localStorage.getItem(LAST_LOGIN_ID_KEY) || "")
+        .trim()
+        .toLowerCase();
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function rememberLoginId(value) {
+    const normalized = String(value || "")
+      .trim()
+      .toLowerCase();
+    try {
+      if (normalized) {
+        localStorage.setItem(LAST_LOGIN_ID_KEY, normalized);
+      } else {
+        localStorage.removeItem(LAST_LOGIN_ID_KEY);
+      }
+    } catch (_) {
+      // Ignore storage issues.
+    }
+  }
+
   function isPasswordlessMode() {
     return Boolean(state.auth.settings?.passwordless);
   }
@@ -434,6 +461,10 @@
     if (el.profileIdentifierLabel) el.profileIdentifierLabel.textContent = identifierLabel;
     if (el.loginEmailInput) {
       el.loginEmailInput.placeholder = passwordless ? "ID DJ (ex: dj_hive_01)" : "Email ou ID admin";
+      if (!el.loginEmailInput.value.trim()) {
+        const remembered = getRememberedLoginId();
+        if (remembered) el.loginEmailInput.value = remembered;
+      }
     }
     if (el.registerEmailInput) {
       el.registerEmailInput.placeholder = passwordless ? "ID DJ unique (ex: dj_maya)" : "Email";
@@ -637,10 +668,14 @@
 
   function persistAuthToken(token) {
     state.auth.token = token || "";
-    if (state.auth.token) {
-      localStorage.setItem(AUTH_TOKEN_KEY, state.auth.token);
-    } else {
-      localStorage.removeItem(AUTH_TOKEN_KEY);
+    try {
+      if (state.auth.token) {
+        localStorage.setItem(AUTH_TOKEN_KEY, state.auth.token);
+      } else {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+      }
+    } catch (_) {
+      // Ignore storage issues.
     }
   }
 
@@ -740,11 +775,31 @@
       headers.Authorization = `Bearer ${state.auth.token}`;
     }
     if (Object.keys(headers).length) requestOptions.headers = headers;
+    const attemptFetch = (targetUrl) => fetch(targetUrl, requestOptions);
     let response;
     try {
-      response = await fetch(url, requestOptions);
+      response = await attemptFetch(url);
     } catch (_) {
-      throw new Error(`Impossible de joindre le backend (${url}). Vérifie l'URL API et que le serveur est en ligne.`);
+      const canFallbackToDefaultCloud =
+        !/^https?:\/\//i.test(path) &&
+        window.location.protocol === "file:" &&
+        normalizeApiBase(DEFAULT_CLOUD_API_BASE) &&
+        normalizeApiBase(runtimeConfig.apiBase) &&
+        normalizeApiBase(runtimeConfig.apiBase) !== normalizeApiBase(DEFAULT_CLOUD_API_BASE);
+      if (canFallbackToDefaultCloud) {
+        const fallbackBase = normalizeApiBase(DEFAULT_CLOUD_API_BASE);
+        const fallbackUrl = `${fallbackBase}${normalizedPath}`;
+        try {
+          response = await attemptFetch(fallbackUrl);
+          setRuntimeApiBase(fallbackBase, true);
+          updateApiConfigUi();
+          setAuthFeedback(`API cloud restaurée automatiquement (${fallbackBase}).`, "success");
+        } catch (_) {
+          throw new Error(`Impossible de joindre le backend (${url}). Vérifie l'URL API et que le serveur est en ligne.`);
+        }
+      } else {
+        throw new Error(`Impossible de joindre le backend (${url}). Vérifie l'URL API et que le serveur est en ligne.`);
+      }
     }
 
     if (!response.ok) {
@@ -1208,8 +1263,44 @@
       updateApiConfigUi();
       return false;
     }
-    persistAuthToken(localStorage.getItem(AUTH_TOKEN_KEY) || "");
+    let storedToken = "";
+    try {
+      storedToken = localStorage.getItem(AUTH_TOKEN_KEY) || "";
+    } catch (_) {
+      storedToken = "";
+    }
+    persistAuthToken(storedToken);
+
+    const rememberedLoginId = getRememberedLoginId();
+    if (el.loginEmailInput && !el.loginEmailInput.value.trim() && rememberedLoginId) {
+      el.loginEmailInput.value = rememberedLoginId;
+    }
+
+    const tryPasswordlessAutoLogin = async () => {
+      if (!isPasswordlessMode()) return false;
+      if (!rememberedLoginId) return false;
+      if (state.auth.autoLoginAttempted) return false;
+      state.auth.autoLoginAttempted = true;
+      try {
+        const payload = await api(
+          "POST",
+          "/api/auth/login",
+          { email: rememberedLoginId, loginId: rememberedLoginId, identifier: rememberedLoginId, password: "" },
+          { auth: false }
+        );
+        persistAuthToken(payload.token || "");
+        setCurrentUser(payload.user || null);
+        lockAppUi(false);
+        setAuthFeedback("Session restaurée automatiquement.", "success");
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
     if (!state.auth.token) {
+      const restored = await tryPasswordlessAutoLogin();
+      if (restored) return true;
       lockAppUi(true);
       return false;
     }
@@ -1219,6 +1310,8 @@
       lockAppUi(false);
       return true;
     } catch (_) {
+      const restored = await tryPasswordlessAutoLogin();
+      if (restored) return true;
       forceLogoutUi("Session expirée. Reconnecte-toi.");
       return false;
     }
@@ -1320,6 +1413,7 @@
     try {
       const payload = await api("POST", "/api/auth/login", { email, loginId: email, identifier: email, password }, { auth: false });
       persistAuthToken(payload.token || "");
+      rememberLoginId(email);
       setCurrentUser(payload.user || null);
       lockAppUi(false);
       setAuthFeedback("Connexion réussie.", "success");
@@ -1376,6 +1470,7 @@
         { auth: false }
       );
       persistAuthToken(payload.token || "");
+      rememberLoginId(email);
       setCurrentUser(payload.user || null);
       lockAppUi(false);
       setAuthFeedback("Compte créé avec succès.", "success");

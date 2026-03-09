@@ -95,6 +95,7 @@ SEED_NEW_USER_LIBRARY = os.getenv("MAYA_SEED_NEW_USER_LIBRARY", "false").strip()
 SEED_BOOTSTRAP_ADMIN_LIBRARY = (
     os.getenv("MAYA_SEED_BOOTSTRAP_ADMIN_LIBRARY", "false").strip().lower() in {"1", "true", "yes", "on"}
 )
+SERATO_STALE_SECONDS = max(5, int(os.getenv("MAYA_SERATO_STALE_SECONDS", "18")))
 
 
 def parse_cors_origins() -> List[str]:
@@ -2843,8 +2844,30 @@ class SeratoBridge:
         }
         self.history_offsets: Dict[str, int] = {}
 
+    def _apply_stale_timeout_locked(self) -> None:
+        if str(self.state.get("status", "")) != "connected":
+            return
+        mode = str(self.state.get("mode", "") or "").strip().lower()
+        if mode not in {"push", "websocket", "feed_file"}:
+            return
+        last_seen_raw = str(self.state.get("lastSeen") or "").strip()
+        if not last_seen_raw:
+            return
+        try:
+            seen_at = parse_iso(last_seen_raw)
+        except Exception:
+            return
+        age_seconds = (datetime.now(timezone.utc) - seen_at).total_seconds()
+        if age_seconds <= float(SERATO_STALE_SECONDS):
+            return
+        self.state["status"] = "disconnected"
+        self.state["lastError"] = f"signal_timeout_{int(age_seconds)}s"
+        self.state["deckA"] = None
+        self.state["deckB"] = None
+
     def get_state(self) -> Dict[str, Any]:
         with self.lock:
+            self._apply_stale_timeout_locked()
             return json.loads(json.dumps(self.state))
 
     def connect(self, mode: str, ws_url: str = "", history_path: str = "", feed_path: str = "") -> Dict[str, Any]:
@@ -4349,11 +4372,20 @@ def cloud_status(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, 
     persistent_target = APP_ENV == "production"
     data_path = str(DB_PATH)
     cloud_ready = bool(DB_PATH.exists())
+    db_size_bytes = int(DB_PATH.stat().st_size) if DB_PATH.exists() else 0
+    db_writable = False
+    try:
+        with DB_PATH.open("a", encoding="utf-8"):
+            db_writable = True
+    except Exception:
+        db_writable = False
     return {
         "cloud": {
             "environment": APP_ENV,
             "dbPath": data_path,
             "dbExists": cloud_ready,
+            "dbWritable": db_writable,
+            "dbSizeBytes": db_size_bytes,
             "persistentTarget": persistent_target,
             "renderDiskPathExpected": "/app/data/maya.db",
             "userTracksCount": user_tracks_count,
