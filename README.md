@@ -219,12 +219,19 @@ Without these credentials, frontend buttons remain visible but disabled and prov
 ## 12) AI / Search / Serato runtime checks
 
 - `GET /api/ai/status` for local/remote AI health
+- `POST /api/ai/chat` for Maya MixIA conversational coach (context-aware)
 - `GET /api/search/unified?q=...` now aggregates iTunes + Deezer + MusicBrainz
 - `GET /api/serato/capabilities` exposes runtime bridge modes and requirements
 - `POST /api/serato/push` accepts local bridge payloads (cloud relay mode)
 - `POST /api/library/apple/sync` refreshes external catalog suggestions from iTunes for your DJ library seeds
 - `GET /api/account/dashboard` returns profile summary, favorites, session runtime, and AI tips
 - `GET /api/cloud/status` verifies DB persistence/runtime info
+- `GET /api/music/providers` returns connect/sync status for Spotify, Deezer, Apple Music
+- `GET /api/music/providers/{provider}/start` starts provider linking (Spotify/Deezer OAuth)
+- `GET /api/music/providers/{provider}/callback` handles provider callback and links account
+- `POST /api/music/providers/{provider}/sync` imports provider library into Maya local library
+- `POST /api/music/providers/{provider}/disconnect` unlinks provider
+- `POST /api/music/providers/apple_music/connect-token` links Apple Music user token (MusicKit flow)
 
 ### Serato desktop auto-sync (client flow)
 

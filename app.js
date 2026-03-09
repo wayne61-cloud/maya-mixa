@@ -87,9 +87,11 @@
     serato: { status: "disconnected", deckA: null, deckB: null, mode: "none", lastSeen: null, lastError: "" },
     history: { averageCompatibility: 0, transitionsCount: 0, playsCount: 0, eventsCount: 0, events: [], externalSavedCount: 0 },
     ai: { localModelActive: true, openaiEnabled: false, openaiConnected: false, localModel: "loading", openaiMessage: "" },
+    musicProviders: {},
     activeSession: null,
     accountDashboard: null,
     lastAppleSyncAt: null,
+    mayaChat: { open: false, busy: false, lastLiveNudgeAt: 0 },
 
     poller: null,
     recommendationsPoller: null,
@@ -169,6 +171,8 @@
     libraryPathInput: document.getElementById("libraryPathInput"),
     scanLibraryBtn: document.getElementById("scanLibraryBtn"),
     scanStatus: document.getElementById("scanStatus"),
+    musicProvidersPanel: document.getElementById("musicProvidersPanel"),
+    profileMusicProviders: document.getElementById("profileMusicProviders"),
 
     trackASelect: document.getElementById("trackASelect"),
     trackBSelect: document.getElementById("trackBSelect"),
@@ -292,6 +296,14 @@
     adminRefreshUsersBtn: document.getElementById("adminRefreshUsersBtn"),
     adminUsersTableBody: document.getElementById("adminUsersTableBody"),
 
+    mayaChatTrigger: document.getElementById("mayaChatTrigger"),
+    mayaChatPanel: document.getElementById("mayaChatPanel"),
+    mayaChatClose: document.getElementById("mayaChatClose"),
+    mayaChatBody: document.getElementById("mayaChatBody"),
+    mayaChatPresets: document.getElementById("mayaChatPresets"),
+    mayaChatForm: document.getElementById("mayaChatForm"),
+    mayaChatInput: document.getElementById("mayaChatInput"),
+
     toast: document.getElementById("toast"),
   };
 
@@ -334,6 +346,8 @@
     document.body.classList.toggle("auth-locked", state.auth.locked);
     if (el.authGate) el.authGate.classList.toggle("active", state.auth.locked);
     if (el.appShell) el.appShell.style.pointerEvents = state.auth.locked ? "none" : "auto";
+    if (el.mayaChatTrigger) el.mayaChatTrigger.classList.toggle("hidden", state.auth.locked);
+    if (state.auth.locked) toggleMayaChat(false);
   }
 
   function normalizeApiBase(value) {
@@ -656,9 +670,11 @@
     state.activeTransition = null;
     state.liveCoach = null;
     state.history = { averageCompatibility: 0, transitionsCount: 0, playsCount: 0, eventsCount: 0, events: [], externalSavedCount: 0 };
+    state.musicProviders = {};
     state.activeSession = null;
     state.accountDashboard = null;
     state.sessionBuilder = { selectedTrackIds: [], analyses: [] };
+    state.mayaChat = { open: false, busy: false, lastLiveNudgeAt: 0 };
     state.serato = { status: "disconnected", deckA: null, deckB: null, mode: "none", lastSeen: null, lastError: "" };
     state.seratoRelay = { socket: null, wsUrl: "", mode: "none", connected: false, forwarding: false };
     state.seratoAutoConnectAt = 0;
@@ -675,6 +691,7 @@
     };
     state.desktopLibrary = { available: Boolean(desktopLibraryApi), roots: [], scanned: 0, truncated: false, lastError: "" };
     state.desktopUpdate = { checkedAt: null, currentVersion: "", latestVersion: "", updateAvailable: false, releaseUrl: "", error: "" };
+    renderMusicProvidersPanels();
   }
 
   function resetSensitiveInputs() {
@@ -915,6 +932,217 @@
     }
   }
 
+  function providerDisplayName(provider) {
+    const map = {
+      spotify: "Spotify",
+      deezer: "Deezer",
+      apple_music: "Apple Music",
+    };
+    return map[String(provider || "").toLowerCase()] || String(provider || "Provider");
+  }
+
+  function providerStateLabel(providerState) {
+    if (!providerState?.configured) return { text: "Non configuré", cls: "offline" };
+    if (providerState?.connected) return { text: "Connecté", cls: "connected" };
+    return { text: "Prêt à connecter", cls: "" };
+  }
+
+  function buildMusicProviderCard(providerState = {}) {
+    const provider = String(providerState.provider || "").toLowerCase();
+    const stateTag = providerStateLabel(providerState);
+    const connection = providerState.connection || {};
+    const mail = connection.externalEmail ? ` • ${esc(connection.externalEmail)}` : "";
+    const expiresAt = connection.expiresAt ? `Expire: ${new Date(connection.expiresAt).toLocaleString()}` : "Token: session active";
+    const baseMeta = providerState.configured
+      ? providerState.connected
+        ? `Compte lié${mail}`
+        : "Compte non lié"
+      : "Configure les variables backend";
+    return `
+      <article class="provider-card" data-provider-card="${esc(provider)}">
+        <div class="provider-head">
+          <div class="provider-title">${esc(providerDisplayName(provider))}</div>
+          <span class="provider-state ${stateTag.cls}">${esc(stateTag.text)}</span>
+        </div>
+        <div class="provider-meta">
+          <div>${esc(baseMeta)}</div>
+          <div>${esc(expiresAt)}</div>
+        </div>
+        <div class="provider-actions">
+          <button class="btn glow-btn" type="button" data-provider-connect="${esc(provider)}">Connecter</button>
+          <button class="btn ghost" type="button" data-provider-sync="${esc(provider)}">Sync</button>
+          <button class="btn ghost" type="button" data-provider-disconnect="${esc(provider)}">Déconnecter</button>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderMusicProvidersPanels() {
+    const providers = state.musicProviders || {};
+    const rows = ["spotify", "deezer", "apple_music"].map((key) => providers[key]).filter(Boolean);
+    const html = rows.length
+      ? rows.map((providerState) => buildMusicProviderCard(providerState)).join("")
+      : `<div class="coach-tip">Providers en attente. Connecte le backend API puis recharge.</div>`;
+    if (el.musicProvidersPanel) el.musicProvidersPanel.innerHTML = html;
+    if (el.profileMusicProviders) el.profileMusicProviders.innerHTML = html;
+  }
+
+  async function refreshMusicProviders() {
+    try {
+      const payload = await api("GET", "/api/music/providers");
+      state.musicProviders = payload?.providers || {};
+    } catch (_) {
+      state.musicProviders = {};
+    }
+    renderMusicProvidersPanels();
+  }
+
+  async function ensureMusicKitLoaded() {
+    if (window.MusicKit) return true;
+    await new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[data-maya-musickit="1"]');
+      if (existing) {
+        existing.addEventListener("load", () => resolve(true), { once: true });
+        existing.addEventListener("error", () => reject(new Error("MusicKit load failed")), { once: true });
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "https://js-cdn.music.apple.com/musickit/v1/musickit.js";
+      script.async = true;
+      script.dataset.mayaMusickit = "1";
+      script.onload = () => resolve(true);
+      script.onerror = () => reject(new Error("MusicKit load failed"));
+      document.head.appendChild(script);
+    });
+    return Boolean(window.MusicKit);
+  }
+
+  async function connectAppleMusicWithMusicKit() {
+    const config = await api("GET", "/api/music/providers/apple_music/config");
+    if (!config?.configured || !config?.developerToken) {
+      throw new Error("Apple Music n'est pas configuré côté backend.");
+    }
+    await ensureMusicKitLoaded();
+    if (!window.MusicKit) throw new Error("MusicKit indisponible sur ce navigateur.");
+    try {
+      window.MusicKit.configure({
+        developerToken: config.developerToken,
+        app: { name: "Maya Mixa", build: "2.6" },
+      });
+    } catch (_) {
+      // Déjà configuré.
+    }
+    const music = window.MusicKit.getInstance();
+    const musicUserToken = await music.authorize();
+    if (!musicUserToken) throw new Error("Autorisation Apple Music refusée");
+    await api("POST", "/api/music/providers/apple_music/connect-token", {
+      music_user_token: musicUserToken,
+      storefront: music.storefrontId || "",
+      profile_name: state.auth.user?.dj_name || state.auth.user?.display_name || "",
+    });
+    showToast("Apple Music connecté");
+  }
+
+  async function startMusicProviderConnect(provider) {
+    const key = String(provider || "").toLowerCase();
+    if (!state.auth.token) {
+      showToast("Connexion requise");
+      return;
+    }
+    if (key === "apple_music") {
+      try {
+        await connectAppleMusicWithMusicKit();
+        await refreshMusicProviders();
+      } catch (error) {
+        showToast(`Apple Music: ${humanizeError(error)}`);
+      }
+      return;
+    }
+    const path = `/api/music/providers/${encodeURIComponent(key)}/start?auth_token=${encodeURIComponent(state.auth.token)}`;
+    const url = runtimeConfig.apiBase ? `${runtimeConfig.apiBase}${path}` : path;
+    window.location.href = url;
+  }
+
+  async function syncMusicProvider(provider) {
+    const key = String(provider || "").toLowerCase();
+    try {
+      const payload = await api("POST", `/api/music/providers/${encodeURIComponent(key)}/sync`, { limit: 220 });
+      const created = Number(payload?.created || 0);
+      const updated = Number(payload?.updated || 0);
+      const fetched = Number(payload?.fetched || payload?.discovered || 0);
+      await refreshMusicProviders();
+      await loadTracks();
+      await runUnifiedSearch();
+      await refreshRecommendations();
+      await refreshHistory();
+      await refreshAccountDashboard();
+      showToast(`Sync ${providerDisplayName(key)} OK (${fetched} • +${created}/${updated})`);
+    } catch (error) {
+      showToast(`Sync ${providerDisplayName(key)} impossible: ${humanizeError(error)}`);
+    }
+  }
+
+  async function disconnectMusicProvider(provider) {
+    const key = String(provider || "").toLowerCase();
+    try {
+      await api("POST", `/api/music/providers/${encodeURIComponent(key)}/disconnect`, {});
+      await refreshMusicProviders();
+      showToast(`${providerDisplayName(key)} déconnecté`);
+    } catch (error) {
+      showToast(`Déconnexion ${providerDisplayName(key)} impossible: ${humanizeError(error)}`);
+    }
+  }
+
+  function appendMayaChatMessage(role, text) {
+    if (!el.mayaChatBody) return;
+    const node = document.createElement("div");
+    node.className = `maya-chat-msg ${role === "user" ? "user" : "ai"}`;
+    node.textContent = String(text || "");
+    el.mayaChatBody.appendChild(node);
+    el.mayaChatBody.scrollTop = el.mayaChatBody.scrollHeight;
+  }
+
+  function toggleMayaChat(force) {
+    const nextOpen = typeof force === "boolean" ? force : !state.mayaChat.open;
+    state.mayaChat.open = nextOpen;
+    if (el.mayaChatPanel) el.mayaChatPanel.classList.toggle("open", nextOpen);
+  }
+
+  function buildMayaContext() {
+    const current = currentDeckTrack(state.serato?.deckA || null);
+    const next = currentDeckTrack(state.serato?.deckB || null);
+    return {
+      currentTrack: current || null,
+      nextTrack: next || null,
+      liveMode: Boolean(state.liveMode),
+      session: state.activeSession ? { active: true, ...state.activeSession } : { active: false },
+      recommendations: state.recommendations.slice(0, 5),
+      selectedExternalTrack: state.selectedExternalDetail?.external || null,
+      transition: state.activeTransition?.analysis || null,
+      searchQuery: String(el.searchInput?.value || "").trim(),
+    };
+  }
+
+  async function askMaya(prompt) {
+    const text = String(prompt || "").trim();
+    if (!text || state.mayaChat.busy) return;
+    toggleMayaChat(true);
+    appendMayaChatMessage("user", text);
+    state.mayaChat.busy = true;
+    try {
+      const payload = await api("POST", "/api/ai/chat", {
+        prompt: text,
+        context: buildMayaContext(),
+      });
+      const answer = payload?.reply?.text || "Réponse IA indisponible.";
+      appendMayaChatMessage("ai", answer);
+    } catch (error) {
+      appendMayaChatMessage("ai", `Erreur IA: ${humanizeError(error)}`);
+    } finally {
+      state.mayaChat.busy = false;
+    }
+  }
+
   function trackPassesFilters(track) {
     const bpmFilter = Number((el.bpmFilterInput?.value || "").trim());
     const keyFilter = (el.keyFilterInput?.value || "").trim().toUpperCase();
@@ -1034,6 +1262,31 @@
       window.history.replaceState({}, document.title, nextUrl);
     } catch (_) {
       // Ignore URL parsing failures.
+    }
+  }
+
+  function bootstrapMusicConnectFromUrl() {
+    try {
+      const params = new URLSearchParams(window.location.search || "");
+      const provider = (params.get("music_provider") || "").trim();
+      const connected = (params.get("music_connected") || "").trim();
+      const error = (params.get("music_error") || "").trim();
+      if (!provider && !connected && !error) return;
+
+      if (connected === "1") {
+        showToast(`${providerDisplayName(provider)} connecté`);
+      } else if (error) {
+        showToast(`${providerDisplayName(provider)}: ${error}`);
+      }
+
+      params.delete("music_provider");
+      params.delete("music_connected");
+      params.delete("music_error");
+      const query = params.toString();
+      const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash || ""}`;
+      window.history.replaceState({}, document.title, nextUrl);
+    } catch (_) {
+      // ignore
     }
   }
 
@@ -1712,6 +1965,7 @@
         <div style="font-size:0.77rem; color:var(--text-secondary); margin-top:8px;">${esc((track.tags || []).join(" • "))}</div>
         <div class="compat-badge ${compatClass(track.note * 10)}">Confiance analyse ${((track.features?.analysis_confidence || 0) * 100).toFixed(0)}%</div>
         <div class="row" style="margin-top:10px;">
+          <button class="btn ghost" type="button" data-local-ai="${track.id}">Fiche IA</button>
           <button class="btn glow-btn" type="button" data-local-analyze="${track.id}">Analyser</button>
           <button class="btn ghost" type="button" data-local-remove="${track.id}">Retirer</button>
         </div>
@@ -1798,6 +2052,9 @@
       const mood = (external.mood_tags || []).join(" • ");
       const tags = (external.tags || []).join(" • ");
       const structure = `intro / build / break / drop / outro`;
+      const reason = compatibility?.breakdown
+        ? `BPM ${compatibility.breakdown.bpm}% • Key ${compatibility.breakdown.key}% • Energy ${compatibility.breakdown.energy}% • Timbre ${compatibility.breakdown.timbre}%`
+        : "";
 
       el.externalDetailBody.innerHTML = `
         <div style="font-size:1.2rem; font-weight:800; margin-bottom:6px;">${esc(external.title)}</div>
@@ -1814,6 +2071,7 @@
           <div class="coach-tip"><strong>Tags:</strong> ${esc(tags || "aucun")}</div>
           <div class="coach-tip"><strong>Compatibilité track en cours:</strong> ${compatibility ? `${compatibility.compatibility}%` : "indisponible"}</div>
           ${compatibility ? `<div class="coach-tip"><strong>Transition conseillée:</strong> start ${formatTime(compatibility.mixPoints.startB)} • mix ${formatTime(compatibility.mixPoints.mixPoint)} • drop ${formatTime(compatibility.mixPoints.dropAlign)}</div>` : ""}
+          ${reason ? `<div class="coach-tip"><strong>Raisonnement IA:</strong> ${esc(reason)}</div>` : ""}
         </div>
       `;
 
@@ -2517,6 +2775,14 @@
     ];
     el.liveCoachList.innerHTML = coachRows.map((line) => `<div class="live-next-row"><span>${esc(line)}</span></div>`).join("");
 
+    if (state.liveMode && coach.message) {
+      const now = Date.now();
+      if (now - Number(state.mayaChat?.lastLiveNudgeAt || 0) > 20000) {
+        appendMayaChatMessage("ai", `🐝 Coach live: ${coach.message}`);
+        state.mayaChat.lastLiveNudgeAt = now;
+      }
+    }
+
     el.liveSuggestions.innerHTML = state.recommendations
       .slice(0, 4)
       .map(
@@ -2753,7 +3019,11 @@
   async function refreshAccountDashboard() {
     try {
       state.accountDashboard = await api("GET", "/api/account/dashboard");
+      if (state.accountDashboard?.musicProviders) {
+        state.musicProviders = state.accountDashboard.musicProviders;
+      }
       renderAccountDashboard();
+      renderMusicProvidersPanels();
     } catch (error) {
       console.error(error);
     }
@@ -2865,17 +3135,27 @@
   async function syncAppleCatalog() {
     if (el.appleSyncBtn) el.appleSyncBtn.disabled = true;
     try {
-      const payload = await api("POST", "/api/library/apple/sync?seeds_limit=12&per_query_limit=4", {});
+      const appleProvider = state.musicProviders?.apple_music || {};
+      let payload = null;
+      if (appleProvider.connected) {
+        payload = await api("POST", "/api/music/providers/apple_music/sync", { limit: 220 });
+      } else {
+        payload = await api("POST", "/api/library/apple/sync?seeds_limit=12&per_query_limit=4", {});
+      }
       state.lastAppleSyncAt = new Date().toISOString();
       setAppleSyncTimestamp(state.lastAppleSyncAt);
-      const discovered = Number(payload?.uniqueExternalTracks || payload?.discovered || 0);
-      el.scanStatus.textContent = `Sync catalogue iTunes terminée: ${discovered} morceaux externes enrichis.`;
+      const discovered = Number(
+        payload?.externalEnriched || payload?.fetched || payload?.uniqueExternalTracks || payload?.discovered || 0
+      );
+      const sourceLabel = appleProvider.connected ? "Apple Music" : "iTunes catalog";
+      el.scanStatus.textContent = `Sync ${sourceLabel} terminée: ${discovered} morceaux traités.`;
+      await loadTracks();
       await runUnifiedSearch();
       await refreshHistory();
       await refreshAccountDashboard();
-      showToast(`Sync catalogue iTunes OK (${discovered})`);
+      showToast(`Sync ${sourceLabel} OK (${discovered})`);
     } catch (error) {
-      showToast(`Sync catalogue iTunes impossible: ${String(error.message || error)}`);
+      showToast(`Sync Apple impossible: ${humanizeError(error)}`);
     } finally {
       if (el.appleSyncBtn) el.appleSyncBtn.disabled = false;
     }
@@ -3128,6 +3408,15 @@
         removeLocalTrack(removeBtn.getAttribute("data-local-remove"));
         return;
       }
+      const aiBtn = event.target.closest("[data-local-ai]");
+      if (aiBtn) {
+        const id = aiBtn.getAttribute("data-local-ai");
+        if (id) {
+          openLocalTrackInAnalysis(id);
+          askMaya(`Analyse ce morceau de ma bibliothèque et explique son potentiel de transition: track_id ${id}.`);
+        }
+        return;
+      }
       const analyzeBtn = event.target.closest("[data-local-analyze]");
       if (analyzeBtn) {
         const forcedId = analyzeBtn.getAttribute("data-local-analyze");
@@ -3197,6 +3486,11 @@
         if (item) navigateTo(item.dataset.screen);
       }
       if (!typing && event.key.toLowerCase() === "l") toggleLive();
+      if (!typing && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        toggleMayaChat(true);
+        if (el.mayaChatInput) el.mayaChatInput.focus();
+      }
       if (event.key === "Escape" && state.liveMode) toggleLive(false);
     });
 
@@ -3342,6 +3636,46 @@
       if (!btn) return;
       removeExternalListItem(btn.getAttribute("data-remove-list-item"));
     });
+
+    const providerDelegate = async (event) => {
+      const connectBtn = event.target.closest("[data-provider-connect]");
+      if (connectBtn) {
+        await startMusicProviderConnect(connectBtn.getAttribute("data-provider-connect"));
+        return;
+      }
+      const syncBtn = event.target.closest("[data-provider-sync]");
+      if (syncBtn) {
+        await syncMusicProvider(syncBtn.getAttribute("data-provider-sync"));
+        return;
+      }
+      const disconnectBtn = event.target.closest("[data-provider-disconnect]");
+      if (disconnectBtn) {
+        await disconnectMusicProvider(disconnectBtn.getAttribute("data-provider-disconnect"));
+      }
+    };
+    on(el.musicProvidersPanel, "click", providerDelegate);
+    on(el.profileMusicProviders, "click", providerDelegate);
+
+    on(el.mayaChatTrigger, "click", () => toggleMayaChat());
+    on(el.mayaChatClose, "click", () => toggleMayaChat(false));
+    on(el.mayaChatForm, "submit", async (event) => {
+      event.preventDefault();
+      const text = String(el.mayaChatInput?.value || "").trim();
+      if (!text) return;
+      if (el.mayaChatInput) el.mayaChatInput.value = "";
+      await askMaya(text);
+    });
+    on(el.mayaChatPresets, "click", async (event) => {
+      const btn = event.target.closest("[data-chat-preset]");
+      if (!btn) return;
+      await askMaya(btn.getAttribute("data-chat-preset"));
+    });
+    document.querySelectorAll("[data-ask-maya]").forEach((button) => {
+      on(button, "click", async () => {
+        await askMaya(button.getAttribute("data-ask-maya"));
+      });
+    });
+
     on(el.adminRefreshUsersBtn, "click", refreshAdminUsers);
     on(el.adminUsersTableBody, "click", (event) => {
       const button = event.target.closest("[data-admin-save]");
@@ -3360,6 +3694,7 @@
     }
     resetRuntimeData();
     await refreshAiStatus();
+    await refreshMusicProviders();
     await loadTracks();
     state.localSearchResults = state.tracks.slice(0, 120);
     renderLibraryLocal();
@@ -3409,6 +3744,7 @@
       await refreshOAuthProviders();
       setAuthTab("login");
       bootstrapOAuthFromUrl();
+      bootstrapMusicConnectFromUrl();
       bootstrapResetFromUrl();
 
       const authenticated = await bootstrapAuth();

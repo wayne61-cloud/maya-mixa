@@ -12,11 +12,11 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import quote_plus, urlencode, urlparse
+from urllib.parse import parse_qs, quote_plus, urlencode, urlparse
 
 import httpx
 import librosa
@@ -83,6 +83,13 @@ GOOGLE_OAUTH_REDIRECT_URI = os.getenv("MAYA_GOOGLE_REDIRECT_URI", "").strip()
 APPLE_OAUTH_CLIENT_ID = os.getenv("MAYA_APPLE_CLIENT_ID", "").strip()
 APPLE_OAUTH_CLIENT_SECRET = os.getenv("MAYA_APPLE_CLIENT_SECRET", "").strip()
 APPLE_OAUTH_REDIRECT_URI = os.getenv("MAYA_APPLE_REDIRECT_URI", "").strip()
+SPOTIFY_OAUTH_CLIENT_ID = os.getenv("MAYA_SPOTIFY_CLIENT_ID", "").strip()
+SPOTIFY_OAUTH_CLIENT_SECRET = os.getenv("MAYA_SPOTIFY_CLIENT_SECRET", "").strip()
+SPOTIFY_OAUTH_REDIRECT_URI = os.getenv("MAYA_SPOTIFY_REDIRECT_URI", "").strip()
+DEEZER_OAUTH_APP_ID = os.getenv("MAYA_DEEZER_APP_ID", "").strip()
+DEEZER_OAUTH_APP_SECRET = os.getenv("MAYA_DEEZER_APP_SECRET", "").strip()
+DEEZER_OAUTH_REDIRECT_URI = os.getenv("MAYA_DEEZER_REDIRECT_URI", "").strip()
+APPLE_MUSIC_DEVELOPER_TOKEN = os.getenv("MAYA_APPLE_MUSIC_DEVELOPER_TOKEN", "").strip()
 AUTH_PASSWORDLESS = os.getenv("MAYA_AUTH_PASSWORDLESS", "true").strip().lower() in {"1", "true", "yes", "on"}
 SEED_NEW_USER_LIBRARY = os.getenv("MAYA_SEED_NEW_USER_LIBRARY", "false").strip().lower() in {"1", "true", "yes", "on"}
 SEED_BOOTSTRAP_ADMIN_LIBRARY = (
@@ -308,37 +315,44 @@ def _b64url_decode(raw: str) -> bytes:
     return base64.urlsafe_b64decode(padded.encode("ascii"))
 
 
-def build_oauth_state(provider: str) -> str:
+def build_oauth_state(provider: str, context: Optional[Dict[str, Any]] = None) -> str:
     payload = {
         "provider": provider,
         "nonce": secrets.token_urlsafe(12),
         "exp": int(time.time()) + OAUTH_STATE_TTL_SECONDS,
+        "ctx": context or {},
     }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     signature = hmac.new(AUTH_SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()
     return f"{_b64url_encode(raw)}.{signature}"
 
 
-def validate_oauth_state(provider: str, state: str) -> bool:
+def decode_oauth_state(provider: str, state: str) -> Optional[Dict[str, Any]]:
     parts = (state or "").split(".", 1)
     if len(parts) != 2:
-        return False
+        return None
     raw_part, signature = parts
     try:
         raw = _b64url_decode(raw_part)
     except Exception:
-        return False
+        return None
     expected = hmac.new(AUTH_SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature):
-        return False
+        return None
     try:
         payload = json.loads(raw.decode("utf-8"))
     except Exception:
-        return False
+        return None
     if payload.get("provider") != provider:
-        return False
+        return None
     expires_at = int(payload.get("exp", 0))
-    return expires_at > int(time.time())
+    if expires_at <= int(time.time()):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def validate_oauth_state(provider: str, state: str) -> bool:
+    return decode_oauth_state(provider, state) is not None
 
 
 def decode_jwt_payload(jwt_token: str) -> Dict[str, Any]:
@@ -393,6 +407,51 @@ def oauth_frontend_redirect(request: Request, auth_token: str = "", provider: st
         params["oauth_provider"] = provider
     if error:
         params["oauth_error"] = error
+    if not params:
+        return f"{base_url}/"
+    return f"{base_url}/?{urlencode(params)}"
+
+
+def music_provider_config(provider: str, request: Request) -> Dict[str, Any]:
+    provider_norm = provider.strip().lower()
+    base_url = resolve_app_base_url(request)
+    if provider_norm == "spotify":
+        callback = SPOTIFY_OAUTH_REDIRECT_URI or f"{base_url}/api/music/providers/spotify/callback"
+        return {
+            "provider": "spotify",
+            "configured": bool(SPOTIFY_OAUTH_CLIENT_ID and SPOTIFY_OAUTH_CLIENT_SECRET),
+            "client_id": SPOTIFY_OAUTH_CLIENT_ID,
+            "client_secret": SPOTIFY_OAUTH_CLIENT_SECRET,
+            "redirect_uri": callback,
+        }
+    if provider_norm == "deezer":
+        callback = DEEZER_OAUTH_REDIRECT_URI or f"{base_url}/api/music/providers/deezer/callback"
+        return {
+            "provider": "deezer",
+            "configured": bool(DEEZER_OAUTH_APP_ID and DEEZER_OAUTH_APP_SECRET),
+            "client_id": DEEZER_OAUTH_APP_ID,
+            "client_secret": DEEZER_OAUTH_APP_SECRET,
+            "redirect_uri": callback,
+        }
+    if provider_norm == "apple_music":
+        return {
+            "provider": "apple_music",
+            "configured": bool(APPLE_MUSIC_DEVELOPER_TOKEN),
+            "developer_token": APPLE_MUSIC_DEVELOPER_TOKEN,
+            "redirect_uri": "",
+        }
+    return {"provider": provider_norm, "configured": False}
+
+
+def music_frontend_redirect(request: Request, provider: str = "", connected: bool = False, error: str = "") -> str:
+    base_url = resolve_app_base_url(request)
+    params: Dict[str, str] = {}
+    if provider:
+        params["music_provider"] = provider
+    if connected:
+        params["music_connected"] = "1"
+    if error:
+        params["music_error"] = error
     if not params:
         return f"{base_url}/"
     return f"{base_url}/?{urlencode(params)}"
@@ -745,6 +804,23 @@ class Database:
                     UNIQUE(provider, subject),
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS music_connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'connected',
+                    access_token TEXT,
+                    refresh_token TEXT,
+                    expires_at TEXT,
+                    external_user_id TEXT,
+                    external_email TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, provider),
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                );
                 """
             )
 
@@ -874,6 +950,100 @@ class Database:
             self.conn.commit()
             row = self.conn.execute("SELECT * FROM oauth_identities WHERE id = ?", (identity_id,)).fetchone()
             return self._row_to_dict(row)
+
+    def get_music_connection(self, user_id: int, provider: str) -> Optional[Dict[str, Any]]:
+        provider_norm = provider.strip().lower()
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM music_connections WHERE user_id = ? AND provider = ?",
+                (user_id, provider_norm),
+            ).fetchone()
+            return self._row_to_dict(row) if row else None
+
+    def list_music_connections(self, user_id: int) -> List[Dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM music_connections WHERE user_id = ? ORDER BY provider ASC",
+                (user_id,),
+            ).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+    def upsert_music_connection(
+        self,
+        user_id: int,
+        provider: str,
+        status: str = "connected",
+        access_token: str = "",
+        refresh_token: str = "",
+        expires_at: Optional[str] = None,
+        external_user_id: str = "",
+        external_email: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        provider_norm = provider.strip().lower()
+        with self.lock:
+            now = now_iso()
+            existing = self.conn.execute(
+                "SELECT id, created_at FROM music_connections WHERE user_id = ? AND provider = ?",
+                (user_id, provider_norm),
+            ).fetchone()
+            if existing:
+                self.conn.execute(
+                    """
+                    UPDATE music_connections
+                    SET status = ?, access_token = ?, refresh_token = ?, expires_at = ?,
+                        external_user_id = ?, external_email = ?, metadata_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        status,
+                        access_token or "",
+                        refresh_token or "",
+                        expires_at,
+                        external_user_id or "",
+                        normalize_email(external_email) if external_email else "",
+                        json.dumps(metadata or {}),
+                        now,
+                        int(existing["id"]),
+                    ),
+                )
+                connection_id = int(existing["id"])
+            else:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO music_connections (
+                        user_id, provider, status, access_token, refresh_token, expires_at,
+                        external_user_id, external_email, metadata_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        provider_norm,
+                        status,
+                        access_token or "",
+                        refresh_token or "",
+                        expires_at,
+                        external_user_id or "",
+                        normalize_email(external_email) if external_email else "",
+                        json.dumps(metadata or {}),
+                        now,
+                        now,
+                    ),
+                )
+                connection_id = int(cur.lastrowid)
+            self.conn.commit()
+            row = self.conn.execute("SELECT * FROM music_connections WHERE id = ?", (connection_id,)).fetchone()
+            return self._row_to_dict(row)
+
+    def delete_music_connection(self, user_id: int, provider: str) -> bool:
+        provider_norm = provider.strip().lower()
+        with self.lock:
+            cur = self.conn.execute(
+                "DELETE FROM music_connections WHERE user_id = ? AND provider = ?",
+                (user_id, provider_norm),
+            )
+            self.conn.commit()
+            return int(cur.rowcount or 0) > 0
 
     def list_users(self, query: str = "", limit: int = 200) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM users"
@@ -1805,6 +1975,65 @@ class AIService:
             }
         except Exception:
             return None
+
+    def assistant_reply(self, prompt: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        question = str(prompt or "").strip()
+        if not question:
+            return {"text": "Décris ton besoin DJ (transition, set, track suivant).", "source": "local"}
+
+        ctx = context or {}
+        current = ctx.get("currentTrack") or {}
+        session = ctx.get("session") or {}
+        recs = ctx.get("recommendations") or []
+        local_response = [
+            "🐝 Maya MixIA active.",
+            f"Question: {question}",
+        ]
+        if isinstance(current, dict) and (current.get("title") or current.get("artist")):
+            local_response.append(
+                f"Track en cours: {current.get('artist', 'Unknown')} - {current.get('title', 'Unknown')} "
+                f"({current.get('bpm', '--')} BPM, {current.get('camelot_key') or current.get('musical_key') or '-'})"
+            )
+        if isinstance(session, dict) and session.get("active"):
+            local_response.append("Session live active: je priorise des transitions stables et lisibles.")
+        if isinstance(recs, list) and recs:
+            head = recs[0]
+            if isinstance(head, dict):
+                track = head.get("track") or {}
+                local_response.append(
+                    f"Suggestion immédiate: {track.get('artist', 'Unknown')} - {track.get('title', 'Unknown')} "
+                    f"({head.get('compatibility', '--')}%)."
+                )
+        local_response.append("Action conseillée: vérifie la clé + cale l’entrée sur 16 ou 32 mesures.")
+
+        if not self.remote_enabled:
+            return {"text": "\n".join(local_response), "source": "local"}
+
+        try:
+            response = self.client.responses.create(
+                model=self.openai_model,
+                input=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Tu es Maya MixIA, copilote DJ francophone. Réponds en style coaching live: "
+                            "court, actionnable, orienté mix réel. Structure: diagnostic, action, timing."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps({"question": question, "context": ctx}, ensure_ascii=False),
+                    },
+                ],
+                temperature=0.35,
+                max_output_tokens=320,
+            )
+            text = (response.output_text or "").strip()
+            if text:
+                return {"text": text, "source": "openai"}
+        except Exception:
+            pass
+        return {"text": "\n".join(local_response), "source": "local"}
 
 
 class AudioAnalyzer:
@@ -3296,6 +3525,21 @@ class ExternalListItemUpdateRequest(BaseModel):
     note: str = ""
 
 
+class AiChatRequest(BaseModel):
+    prompt: str
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MusicProviderSyncRequest(BaseModel):
+    limit: int = 120
+
+
+class AppleMusicTokenConnectRequest(BaseModel):
+    music_user_token: str
+    storefront: str = ""
+    profile_name: str = ""
+
+
 class AuthRegisterRequest(BaseModel):
     email: str = ""
     loginId: str = ""
@@ -3412,6 +3656,27 @@ def get_current_user(authorization: Optional[str] = Header(default=None, alias="
         raise HTTPException(status_code=403, detail="User inactive")
     db.touch_auth_session(int(session["id"]))
     user["_session_token_hash"] = hashed
+    return user
+
+
+def get_user_from_raw_auth_token(raw_token: str) -> Optional[Dict[str, Any]]:
+    value = str(raw_token or "").strip()
+    if not value:
+        return None
+    hashed = token_hash(value)
+    session = db.get_auth_session(hashed)
+    if not session or session.get("revoked_at"):
+        return None
+    try:
+        expires_at = parse_iso(session["expires_at"])
+    except Exception:
+        return None
+    if expires_at <= datetime.now(timezone.utc):
+        return None
+    user = db.get_user(int(session["user_id"]))
+    if not user or user.get("status") != "active":
+        return None
+    db.touch_auth_session(int(session["id"]))
     return user
 
 
@@ -3619,6 +3884,366 @@ def score_external_against_library(
     return scored[:limit]
 
 
+def serialize_music_connection(connection: Dict[str, Any]) -> Dict[str, Any]:
+    provider = str(connection.get("provider") or "").strip().lower()
+    expires_at = str(connection.get("expires_at") or "").strip()
+    metadata = connection.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        "provider": provider,
+        "status": str(connection.get("status") or "connected"),
+        "connected": bool(connection.get("access_token") or metadata.get("music_user_token")),
+        "expiresAt": expires_at or None,
+        "externalUserId": str(connection.get("external_user_id") or "").strip() or None,
+        "externalEmail": str(connection.get("external_email") or "").strip() or None,
+        "metadata": metadata,
+    }
+
+
+def music_providers_status(user_id: int, request: Optional[Request] = None) -> Dict[str, Any]:
+    rows = db.list_music_connections(user_id)
+    by_provider = {str(row.get("provider") or "").strip().lower(): row for row in rows}
+    configs = {
+        "spotify": music_provider_config("spotify", request) if request else {"configured": bool(SPOTIFY_OAUTH_CLIENT_ID and SPOTIFY_OAUTH_CLIENT_SECRET)},
+        "deezer": music_provider_config("deezer", request) if request else {"configured": bool(DEEZER_OAUTH_APP_ID and DEEZER_OAUTH_APP_SECRET)},
+        "apple_music": music_provider_config("apple_music", request) if request else {"configured": bool(APPLE_MUSIC_DEVELOPER_TOKEN)},
+    }
+
+    out: Dict[str, Any] = {}
+    for provider in ("spotify", "deezer", "apple_music"):
+        row = by_provider.get(provider)
+        serialized = serialize_music_connection(row) if row else None
+        cfg = configs.get(provider) or {}
+        out[provider] = {
+            "provider": provider,
+            "configured": bool(cfg.get("configured")),
+            "connected": bool(serialized and serialized.get("connected")),
+            "connection": serialized,
+            "startUrl": f"/api/music/providers/{provider}/start",
+            "syncUrl": f"/api/music/providers/{provider}/sync",
+            "disconnectUrl": f"/api/music/providers/{provider}/disconnect",
+        }
+    return out
+
+
+def connection_expired(connection: Dict[str, Any]) -> bool:
+    expires_raw = str(connection.get("expires_at") or "").strip()
+    if not expires_raw:
+        return False
+    try:
+        expires = parse_iso(expires_raw)
+    except Exception:
+        return False
+    return expires <= datetime.now(timezone.utc) + timedelta(seconds=15)
+
+
+def spotify_refresh_connection(user_id: int, connection: Dict[str, Any]) -> Dict[str, Any]:
+    refresh_token = str(connection.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return connection
+    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+        response = client.post(
+            "https://accounts.spotify.com/api/token",
+            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            headers={
+                "Authorization": "Basic "
+                + base64.b64encode(f"{SPOTIFY_OAUTH_CLIENT_ID}:{SPOTIFY_OAUTH_CLIENT_SECRET}".encode("utf-8")).decode("ascii"),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+    next_access = str(payload.get("access_token") or "").strip()
+    next_refresh = str(payload.get("refresh_token") or refresh_token).strip()
+    expires_in = int(payload.get("expires_in") or 3600)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(60, expires_in))
+    return db.upsert_music_connection(
+        user_id=user_id,
+        provider="spotify",
+        status="connected",
+        access_token=next_access,
+        refresh_token=next_refresh,
+        expires_at=expires_at.isoformat(),
+        external_user_id=str(connection.get("external_user_id") or ""),
+        external_email=str(connection.get("external_email") or ""),
+        metadata=connection.get("metadata") or {},
+    )
+
+
+def ensure_provider_token(user_id: int, provider: str) -> Dict[str, Any]:
+    provider_norm = provider.strip().lower()
+    connection = db.get_music_connection(user_id, provider_norm)
+    if not connection:
+        raise HTTPException(status_code=404, detail=f"Provider {provider_norm} non connecté")
+    if provider_norm == "spotify" and connection_expired(connection):
+        try:
+            connection = spotify_refresh_connection(user_id, connection)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Refresh Spotify impossible: {exc}")
+    return connection
+
+
+def sync_spotify_library(connection: Dict[str, Any], limit: int = 120) -> List[Dict[str, Any]]:
+    token = str(connection.get("access_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Spotify access token manquant")
+    rows: List[Dict[str, Any]] = []
+    remaining = max(1, min(limit, 500))
+    offset = 0
+    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+        while remaining > 0:
+            page_size = min(50, remaining)
+            response = client.get(
+                "https://api.spotify.com/v1/me/tracks",
+                params={"limit": page_size, "offset": offset},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            items = payload.get("items") or []
+            if not items:
+                break
+            for item in items:
+                track = item.get("track") or {}
+                track_id = str(track.get("id") or "").strip()
+                title = str(track.get("name") or "").strip()
+                artists = [str(a.get("name") or "").strip() for a in (track.get("artists") or [])]
+                artist = " & ".join([a for a in artists if a]) or "Unknown Artist"
+                if not track_id or not title:
+                    continue
+                album = track.get("album") or {}
+                rows.append(
+                    {
+                        "source": "spotify",
+                        "source_track_id": track_id,
+                        "source_url": (track.get("external_urls") or {}).get("spotify") or "",
+                        "title": title,
+                        "artist": artist,
+                        "version": str(album.get("name") or "").strip(),
+                        "duration": round(float(track.get("duration_ms") or 0) / 1000.0, 2) if track.get("duration_ms") else None,
+                        "genre": "",
+                        "metadata": {
+                            "album": str(album.get("name") or "").strip(),
+                            "release_date": str(album.get("release_date") or "").strip(),
+                            "isrc": ((track.get("external_ids") or {}).get("isrc") or ""),
+                        },
+                    }
+                )
+            remaining -= len(items)
+            offset += len(items)
+            if len(items) < page_size:
+                break
+    return rows
+
+
+def sync_deezer_library(connection: Dict[str, Any], limit: int = 120) -> List[Dict[str, Any]]:
+    token = str(connection.get("access_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Deezer access token manquant")
+    rows: List[Dict[str, Any]] = []
+    remaining = max(1, min(limit, 500))
+    index = 0
+    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+        while remaining > 0:
+            page_size = min(50, remaining)
+            response = client.get(
+                "https://api.deezer.com/user/me/tracks",
+                params={"access_token": token, "limit": page_size, "index": index},
+                headers={"User-Agent": "MayaMixa/2.6"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            items = payload.get("data") or []
+            if not items:
+                break
+            for item in items:
+                track_id = str(item.get("id") or "").strip()
+                title = str(item.get("title") or "").strip()
+                artist = str((item.get("artist") or {}).get("name") or "").strip() or "Unknown Artist"
+                if not track_id or not title:
+                    continue
+                album = item.get("album") or {}
+                rows.append(
+                    {
+                        "source": "deezer",
+                        "source_track_id": track_id,
+                        "source_url": str(item.get("link") or "").strip(),
+                        "title": title,
+                        "artist": artist,
+                        "version": str(album.get("title") or "").strip(),
+                        "duration": float(item.get("duration")) if item.get("duration") else None,
+                        "genre": "",
+                        "metadata": {
+                            "album": str(album.get("title") or "").strip(),
+                            "preview_url": str(item.get("preview") or "").strip(),
+                            "rank": item.get("rank"),
+                        },
+                    }
+                )
+            remaining -= len(items)
+            index += len(items)
+            if len(items) < page_size:
+                break
+    return rows
+
+
+def sync_apple_music_library(connection: Dict[str, Any], limit: int = 120) -> List[Dict[str, Any]]:
+    if not APPLE_MUSIC_DEVELOPER_TOKEN:
+        raise HTTPException(status_code=400, detail="Apple Music developer token non configuré")
+    metadata = connection.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    music_user_token = str(metadata.get("music_user_token") or "").strip()
+    if not music_user_token:
+        raise HTTPException(status_code=400, detail="Music User Token Apple manquant")
+
+    rows: List[Dict[str, Any]] = []
+    remaining = max(1, min(limit, 500))
+    offset = 0
+    with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+        while remaining > 0:
+            page_size = min(100, remaining)
+            response = client.get(
+                "https://api.music.apple.com/v1/me/library/songs",
+                params={"limit": page_size, "offset": offset},
+                headers={
+                    "Authorization": f"Bearer {APPLE_MUSIC_DEVELOPER_TOKEN}",
+                    "Music-User-Token": music_user_token,
+                    "User-Agent": "MayaMixa/2.6",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") or []
+            if not data:
+                break
+            for item in data:
+                attributes = item.get("attributes") or {}
+                track_id = str(item.get("id") or "").strip()
+                title = str(attributes.get("name") or "").strip()
+                artist = str(attributes.get("artistName") or "").strip() or "Unknown Artist"
+                if not track_id or not title:
+                    continue
+                duration_ms = attributes.get("durationInMillis")
+                rows.append(
+                    {
+                        "source": "apple_music",
+                        "source_track_id": track_id,
+                        "source_url": "",
+                        "title": title,
+                        "artist": artist,
+                        "version": str(attributes.get("albumName") or "").strip(),
+                        "duration": round(float(duration_ms) / 1000.0, 2) if duration_ms else None,
+                        "genre": str((attributes.get("genreNames") or [""])[0]).strip().lower(),
+                        "metadata": {
+                            "album": str(attributes.get("albumName") or "").strip(),
+                            "play_params": attributes.get("playParams") or {},
+                            "artwork": attributes.get("artwork") or {},
+                        },
+                    }
+                )
+            remaining -= len(data)
+            offset += len(data)
+            if len(data) < page_size:
+                break
+    return rows
+
+
+def sync_provider_rows_to_library(user_id: int, provider: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    created = 0
+    updated = 0
+    linked = 0
+    external_count = 0
+    errors: List[str] = []
+    for item in rows:
+        try:
+            external = upsert_external_from_metadata(item, deep=False)
+            external_count += 1
+            local_payload = external_track_to_local_payload(external)
+            existed = db.get_track_by_path(str(local_payload.get("file_path") or ""))
+            track = db.upsert_track(local_payload)
+            already_linked = db.get_track(int(track["id"]), user_id=user_id) is not None
+            if not already_linked:
+                db.link_user_track(user_id, int(track["id"]))
+                linked += 1
+            else:
+                db.link_user_track(user_id, int(track["id"]))
+            if existed:
+                updated += 1
+            else:
+                created += 1
+        except Exception as exc:  # noqa: BLE001
+            if len(errors) < 10:
+                errors.append(str(exc))
+    db.add_event(
+        "music.provider_sync",
+        {
+            "provider": provider,
+            "rows": len(rows),
+            "created": created,
+            "updated": updated,
+            "linked": linked,
+            "external": external_count,
+        },
+        user_id=user_id,
+    )
+    return {
+        "provider": provider,
+        "fetched": len(rows),
+        "externalEnriched": external_count,
+        "created": created,
+        "updated": updated,
+        "linked": linked,
+        "errors": errors,
+    }
+
+
+def run_apple_seed_sync(user_id: int, seeds_limit: int = 12, per_query_limit: int = 4) -> Dict[str, Any]:
+    local_tracks = db.list_tracks(limit=max(10, seeds_limit), user_id=user_id)
+    queries: List[str] = []
+    for track in local_tracks[:seeds_limit]:
+        artist = str(track.get("artist") or "").strip()
+        title = str(track.get("title") or "").strip()
+        query = " ".join(part for part in [artist, title] if part).strip()
+        if query:
+            queries.append(query)
+
+    if not queries:
+        user = db.get_user(user_id) or {}
+        fallback = str(user.get("dj_name") or user.get("display_name") or "melodic techno")
+        queries = [f"{fallback} techno", "melodic techno", "peak time techno"]
+
+    discovered = 0
+    updated_ids = set()
+    for query in queries:
+        rows = music_hub.search_itunes_catalog(query, limit=per_query_limit)
+        for item in rows:
+            try:
+                saved = upsert_external_from_metadata(item, deep=False)
+                updated_ids.add(int(saved["id"]))
+                discovered += 1
+            except Exception:
+                continue
+
+    db.add_event(
+        "library.apple_sync",
+        {
+            "queries": len(queries),
+            "discovered": discovered,
+            "uniqueExternalTracks": len(updated_ids),
+        },
+        user_id=user_id,
+    )
+    return {
+        "ok": True,
+        "queriesUsed": queries,
+        "discovered": discovered,
+        "uniqueExternalTracks": len(updated_ids),
+        "source": "itunes-catalog",
+    }
+
+
 def session_elapsed_seconds(session: Optional[Dict[str, Any]]) -> int:
     if not session:
         return 0
@@ -3746,6 +4371,30 @@ def ai_status(test_remote: bool = Query(default=False)) -> Dict[str, Any]:
         "note": "Online metadata enrichment is used for global search and external track intelligence.",
     }
     return status
+
+
+@app.post("/api/ai/chat")
+def ai_chat(payload: AiChatRequest, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    prompt = str(payload.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt requis")
+
+    context = payload.context or {}
+    if not isinstance(context, dict):
+        context = {}
+
+    context.setdefault("user", {"id": user_id, "dj_name": user.get("dj_name"), "display_name": user.get("display_name")})
+    context.setdefault("session", db.current_session(user_id=user_id) or {})
+    context.setdefault("history", db.history_summary(user_id=user_id))
+
+    reply = ai_service.assistant_reply(prompt, context=context)
+    db.add_event(
+        "ai.chat",
+        {"prompt": prompt[:200], "source": reply.get("source", "local")},
+        user_id=user_id,
+    )
+    return {"ok": True, "reply": reply}
 
 
 @app.get("/api/auth/config")
@@ -4017,6 +4666,295 @@ async def auth_oauth_callback(
     return RedirectResponse(redirect_url, status_code=302)
 
 
+@app.get("/api/music/providers")
+def music_providers(request: Request, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    return {"providers": music_providers_status(user_id=user_id, request=request)}
+
+
+@app.get("/api/music/providers/apple_music/config")
+def music_apple_config(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    return {
+        "provider": "apple_music",
+        "configured": bool(APPLE_MUSIC_DEVELOPER_TOKEN),
+        "developerToken": APPLE_MUSIC_DEVELOPER_TOKEN if APPLE_MUSIC_DEVELOPER_TOKEN else "",
+    }
+
+
+@app.get("/api/music/providers/{provider}/start")
+def music_provider_start(provider: str, request: Request, auth_token: str = Query(default="")) -> RedirectResponse:
+    provider_norm = provider.strip().lower()
+    if provider_norm not in {"spotify", "deezer"}:
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="unsupported_provider")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    user = get_user_from_raw_auth_token(auth_token)
+    if not user:
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="invalid_auth_token")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    config = music_provider_config(provider_norm, request)
+    if not config.get("configured"):
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="not_configured")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    state_token = build_oauth_state(f"music:{provider_norm}", {"uid": int(user["id"])})
+    if provider_norm == "spotify":
+        params = {
+            "client_id": config["client_id"],
+            "response_type": "code",
+            "redirect_uri": config["redirect_uri"],
+            "scope": "user-library-read user-read-email user-read-private",
+            "state": state_token,
+            "show_dialog": "false",
+        }
+        target = "https://accounts.spotify.com/authorize?" + urlencode(params)
+    else:
+        params = {
+            "app_id": config["client_id"],
+            "redirect_uri": config["redirect_uri"],
+            "perms": "basic_access,email,listening_history",
+            "state": state_token,
+        }
+        target = "https://connect.deezer.com/oauth/auth.php?" + urlencode(params)
+    return RedirectResponse(target, status_code=302)
+
+
+@app.get("/api/music/providers/{provider}/callback")
+def music_provider_callback(
+    provider: str,
+    request: Request,
+    code: str = Query(default=""),
+    state: str = Query(default=""),
+    error: str = Query(default=""),
+) -> RedirectResponse:
+    provider_norm = provider.strip().lower()
+    if provider_norm not in {"spotify", "deezer"}:
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="unsupported_provider")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    incoming_code = (code or "").strip()
+    incoming_state = (state or "").strip()
+    incoming_error = (error or "").strip()
+    if not incoming_code and request.url.query:
+        query_values = parse_qs(request.url.query)
+        incoming_code = incoming_code or str((query_values.get("code") or [""])[0]).strip()
+        incoming_state = incoming_state or str((query_values.get("state") or [""])[0]).strip()
+        incoming_error = incoming_error or str((query_values.get("error") or [""])[0]).strip()
+
+    if incoming_error:
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error=incoming_error)
+        return RedirectResponse(redirect_url, status_code=302)
+    if not incoming_code or not incoming_state:
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="missing_code_or_state")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    state_payload = decode_oauth_state(f"music:{provider_norm}", incoming_state)
+    if not state_payload:
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="invalid_state")
+        return RedirectResponse(redirect_url, status_code=302)
+    user_id = int((state_payload.get("ctx") or {}).get("uid") or 0)
+    if user_id <= 0:
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="missing_user_context")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    config = music_provider_config(provider_norm, request)
+    if not config.get("configured"):
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="not_configured")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    access_token = ""
+    refresh_token = ""
+    expires_at: Optional[str] = None
+    external_user_id = ""
+    external_email = ""
+    metadata: Dict[str, Any] = {}
+
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True) as http:
+            if provider_norm == "spotify":
+                token_response = http.post(
+                    "https://accounts.spotify.com/api/token",
+                    data={
+                        "code": incoming_code,
+                        "redirect_uri": config["redirect_uri"],
+                        "grant_type": "authorization_code",
+                    },
+                    headers={
+                        "Authorization": "Basic "
+                        + base64.b64encode(f"{config['client_id']}:{config['client_secret']}".encode("utf-8")).decode("ascii"),
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+                token_response.raise_for_status()
+                token_payload = token_response.json()
+                access_token = str(token_payload.get("access_token") or "").strip()
+                refresh_token = str(token_payload.get("refresh_token") or "").strip()
+                expires_in = int(token_payload.get("expires_in") or 3600)
+                expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(120, expires_in))).isoformat()
+                profile = http.get(
+                    "https://api.spotify.com/v1/me",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                profile.raise_for_status()
+                profile_payload = profile.json()
+                external_user_id = str(profile_payload.get("id") or "").strip()
+                external_email = str(profile_payload.get("email") or "").strip()
+                metadata = {"display_name": str(profile_payload.get("display_name") or "").strip()}
+            else:
+                token_response = http.get(
+                    "https://connect.deezer.com/oauth/access_token.php",
+                    params={
+                        "app_id": config["client_id"],
+                        "secret": config["client_secret"],
+                        "code": incoming_code,
+                        "output": "json",
+                    },
+                )
+                token_response.raise_for_status()
+                try:
+                    token_payload = token_response.json()
+                except Exception:
+                    token_payload = {}
+                if not token_payload:
+                    parsed = parse_qs(str(token_response.text or "").strip())
+                    token_payload = {k: (v[0] if isinstance(v, list) and v else "") for k, v in parsed.items()}
+                access_token = str(token_payload.get("access_token") or "").strip()
+                expires_in = int(token_payload.get("expires") or token_payload.get("expires_in") or 3600)
+                expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(120, expires_in))).isoformat()
+                profile = http.get(
+                    "https://api.deezer.com/user/me",
+                    params={"access_token": access_token},
+                )
+                profile.raise_for_status()
+                profile_payload = profile.json()
+                external_user_id = str(profile_payload.get("id") or "").strip()
+                external_email = str(profile_payload.get("email") or "").strip()
+                metadata = {"name": str(profile_payload.get("name") or "").strip()}
+    except Exception as exc:  # noqa: BLE001
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error=f"token_exchange_failed:{exc}")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    if not access_token:
+        redirect_url = music_frontend_redirect(request, provider=provider_norm, error="missing_access_token")
+        return RedirectResponse(redirect_url, status_code=302)
+
+    db.upsert_music_connection(
+        user_id=user_id,
+        provider=provider_norm,
+        status="connected",
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at,
+        external_user_id=external_user_id,
+        external_email=external_email,
+        metadata=metadata,
+    )
+    db.add_event(
+        "music.provider_connected",
+        {"provider": provider_norm, "external_user_id": external_user_id},
+        user_id=user_id,
+    )
+    redirect_url = music_frontend_redirect(request, provider=provider_norm, connected=True)
+    return RedirectResponse(redirect_url, status_code=302)
+
+
+@app.post("/api/music/providers/apple_music/connect-token")
+def music_apple_connect_token(
+    payload: AppleMusicTokenConnectRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if not APPLE_MUSIC_DEVELOPER_TOKEN:
+        raise HTTPException(status_code=503, detail="Apple Music developer token non configuré")
+    user_token = str(payload.music_user_token or "").strip()
+    if len(user_token) < 20:
+        raise HTTPException(status_code=400, detail="Music User Token Apple invalide")
+    user_id = int(user["id"])
+
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True) as http:
+            validation = http.get(
+                "https://api.music.apple.com/v1/me/library/songs",
+                params={"limit": 1},
+                headers={
+                    "Authorization": f"Bearer {APPLE_MUSIC_DEVELOPER_TOKEN}",
+                    "Music-User-Token": user_token,
+                    "User-Agent": "MayaMixa/2.6",
+                },
+            )
+            validation.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Apple Music token invalide: {exc}")
+
+    connection = db.upsert_music_connection(
+        user_id=user_id,
+        provider="apple_music",
+        status="connected",
+        access_token="",
+        refresh_token="",
+        expires_at=None,
+        external_user_id="",
+        external_email="",
+        metadata={
+            "music_user_token": user_token,
+            "storefront": str(payload.storefront or "").strip(),
+            "profile_name": str(payload.profile_name or "").strip(),
+        },
+    )
+    db.add_event("music.provider_connected", {"provider": "apple_music", "mode": "music_user_token"}, user_id=user_id)
+    return {"ok": True, "provider": "apple_music", "connection": serialize_music_connection(connection)}
+
+
+@app.post("/api/music/providers/{provider}/sync")
+def music_provider_sync(
+    provider: str,
+    payload: MusicProviderSyncRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    provider_norm = provider.strip().lower()
+    user_id = int(user["id"])
+    limit = max(10, min(int(payload.limit or 120), 500))
+
+    if provider_norm == "spotify":
+        connection = ensure_provider_token(user_id, "spotify")
+        rows = sync_spotify_library(connection, limit=limit)
+        sync_info = sync_provider_rows_to_library(user_id, provider_norm, rows)
+        return {"ok": True, **sync_info}
+
+    if provider_norm == "deezer":
+        connection = ensure_provider_token(user_id, "deezer")
+        rows = sync_deezer_library(connection, limit=limit)
+        sync_info = sync_provider_rows_to_library(user_id, provider_norm, rows)
+        return {"ok": True, **sync_info}
+
+    if provider_norm == "apple_music":
+        connection = db.get_music_connection(user_id, "apple_music")
+        if connection:
+            try:
+                rows = sync_apple_music_library(connection, limit=limit)
+                sync_info = sync_provider_rows_to_library(user_id, provider_norm, rows)
+                return {"ok": True, **sync_info}
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=f"Sync Apple Music impossible: {exc}")
+        fallback = run_apple_seed_sync(user_id=user_id, seeds_limit=12, per_query_limit=4)
+        return {"ok": True, "provider": "apple_music", "fallback": True, **fallback}
+
+    raise HTTPException(status_code=404, detail="Provider unsupported")
+
+
+@app.post("/api/music/providers/{provider}/disconnect")
+def music_provider_disconnect(provider: str, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    provider_norm = provider.strip().lower()
+    if provider_norm not in {"spotify", "deezer", "apple_music"}:
+        raise HTTPException(status_code=404, detail="Provider unsupported")
+    user_id = int(user["id"])
+    removed = db.delete_music_connection(user_id, provider_norm)
+    db.add_event("music.provider_disconnected", {"provider": provider_norm, "removed": removed}, user_id=user_id)
+    return {"ok": True, "provider": provider_norm, "removed": bool(removed)}
+
+
 @app.post("/api/auth/forgot-password")
 def auth_forgot_password(payload: AuthForgotPasswordRequest, request: Request) -> Dict[str, Any]:
     if AUTH_PASSWORDLESS:
@@ -4266,48 +5204,11 @@ def sync_apple_catalog(
     per_query_limit: int = Query(default=4, ge=1, le=12),
     user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    user_id = int(user["id"])
-    local_tracks = db.list_tracks(limit=max(10, seeds_limit), user_id=user_id)
-    queries: List[str] = []
-    for track in local_tracks[:seeds_limit]:
-        artist = str(track.get("artist") or "").strip()
-        title = str(track.get("title") or "").strip()
-        query = " ".join(part for part in [artist, title] if part).strip()
-        if query:
-            queries.append(query)
-
-    if not queries:
-        fallback = str(user.get("dj_name") or user.get("display_name") or "melodic techno")
-        queries = [f"{fallback} techno", "melodic techno", "peak time techno"]
-
-    discovered = 0
-    updated_ids = set()
-    for query in queries:
-        rows = music_hub.search_itunes_catalog(query, limit=per_query_limit)
-        for item in rows:
-            try:
-                saved = upsert_external_from_metadata(item, deep=False)
-                updated_ids.add(int(saved["id"]))
-                discovered += 1
-            except Exception:
-                continue
-
-    db.add_event(
-        "library.apple_sync",
-        {
-            "queries": len(queries),
-            "discovered": discovered,
-            "uniqueExternalTracks": len(updated_ids),
-        },
-        user_id=user_id,
+    return run_apple_seed_sync(
+        user_id=int(user["id"]),
+        seeds_limit=seeds_limit,
+        per_query_limit=per_query_limit,
     )
-    return {
-        "ok": True,
-        "queriesUsed": queries,
-        "discovered": discovered,
-        "uniqueExternalTracks": len(updated_ids),
-        "source": "itunes-catalog",
-    }
 
 
 @app.get("/api/library/tracks/{track_id}")
@@ -4657,6 +5558,7 @@ def account_dashboard(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[
         "topTracks": top_tracks,
         "aiTips": tips,
         "cloud": cloud,
+        "musicProviders": music_providers_status(user_id=user_id),
     }
 
 
