@@ -481,6 +481,45 @@
       background: rgba(20, 14, 5, 0.88);
     }
 
+    .metric-chip {
+      font-size: 0.92rem;
+      font-weight: 850;
+      letter-spacing: 0.01em;
+      padding: 7px 12px;
+      border-width: 1px;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04), 0 6px 14px rgba(0, 0, 0, 0.3);
+    }
+
+    .metric-bpm {
+      border-color: rgba(45, 212, 255, 0.68);
+      color: #c9f5ff;
+      background: rgba(19, 63, 74, 0.55);
+    }
+
+    .metric-key {
+      border-color: rgba(160, 220, 130, 0.68);
+      color: #e9ffd7;
+      background: rgba(35, 66, 25, 0.5);
+    }
+
+    .metric-note {
+      border-color: rgba(255, 201, 40, 0.72);
+      color: #fff5cb;
+      background: rgba(88, 64, 7, 0.54);
+    }
+
+    .metric-energy {
+      border-color: rgba(255, 132, 64, 0.75);
+      color: #ffe3d0;
+      background: rgba(87, 35, 8, 0.58);
+    }
+
+    .metric-genre {
+      border-color: rgba(255, 255, 255, 0.18);
+      color: var(--text-secondary);
+      background: rgba(20, 14, 5, 0.92);
+    }
+
     .score-big {
       font-size: clamp(2.2rem, 7vw, 3.4rem);
       font-weight: 900;
@@ -740,6 +779,57 @@
       gap: 8px;
     }
 
+    .pole-help {
+      border: 1px solid rgba(255, 201, 40, 0.58);
+      border-radius: 12px;
+      background: linear-gradient(170deg, rgba(28, 20, 6, 0.96), rgba(13, 10, 4, 0.96));
+      box-shadow: 0 0 0 1px rgba(255, 201, 40, 0.14), 0 0 22px rgba(255, 201, 40, 0.18);
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+
+    .pole-help summary {
+      list-style: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      font-size: 0.84rem;
+      font-weight: 800;
+      color: #ffdf7a;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      background: linear-gradient(135deg, rgba(255, 201, 40, 0.18), rgba(255, 201, 40, 0.06));
+      border-bottom: 1px solid rgba(255, 201, 40, 0.22);
+    }
+
+    .pole-help summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .pole-help-body {
+      display: grid;
+      gap: 8px;
+      padding: 10px 12px 12px;
+      font-size: 0.88rem;
+      color: var(--text-secondary);
+    }
+
+    .pole-help-steps {
+      display: grid;
+      gap: 6px;
+      margin-top: 2px;
+    }
+
+    .pole-help-step {
+      border: 1px solid rgba(255, 201, 40, 0.18);
+      border-radius: 9px;
+      padding: 8px 10px;
+      background: rgba(255, 201, 40, 0.06);
+    }
+
     .coach-tip {
       border: 1px solid var(--border);
       background: rgba(31, 22, 5, 0.9);
@@ -777,10 +867,11 @@
     }
 
     .kpi-value {
-      font-size: 1.28rem;
+      font-size: 1.5rem;
       font-weight: 800;
       color: var(--accent-alt);
       margin-top: 4px;
+      line-height: 1.05;
     }
 
     .kpi-value.note {
@@ -789,6 +880,66 @@
       -webkit-background-clip: text;
       background-clip: text;
       color: transparent;
+    }
+
+    .kpi-tile.metric-bpm {
+      border-color: rgba(45, 212, 255, 0.45);
+      background: linear-gradient(160deg, rgba(17, 44, 54, 0.78), rgba(13, 10, 4, 0.92));
+    }
+
+    .kpi-tile.metric-key {
+      border-color: rgba(160, 220, 130, 0.45);
+      background: linear-gradient(160deg, rgba(29, 54, 20, 0.74), rgba(13, 10, 4, 0.92));
+    }
+
+    .kpi-tile.metric-energy {
+      border-color: rgba(255, 132, 64, 0.45);
+      background: linear-gradient(160deg, rgba(63, 33, 17, 0.74), rgba(13, 10, 4, 0.92));
+    }
+
+    .kpi-tile.metric-note {
+      border-color: rgba(255, 201, 40, 0.52);
+      background: linear-gradient(160deg, rgba(66, 45, 12, 0.78), rgba(13, 10, 4, 0.92));
+    }
+
+    .kpi-tile.metric-confidence {
+      border-color: rgba(199, 199, 199, 0.35);
+      background: linear-gradient(160deg, rgba(40, 35, 23, 0.75), rgba(13, 10, 4, 0.92));
+    }
+
+    .kpi-tile.metric-dance {
+      border-color: rgba(255, 255, 255, 0.22);
+      background: linear-gradient(160deg, rgba(40, 35, 23, 0.75), rgba(13, 10, 4, 0.92));
+    }
+
+    .kpi-value.metric-bpm {
+      color: #b9eeff;
+      font-size: 1.82rem;
+    }
+
+    .kpi-value.metric-key {
+      color: #ddffcc;
+      font-size: 1.75rem;
+    }
+
+    .kpi-value.metric-energy {
+      color: #ffd4b3;
+      font-size: 1.82rem;
+    }
+
+    .kpi-value.metric-note {
+      color: #ffe9a3;
+      font-size: 1.92rem;
+    }
+
+    .kpi-value.metric-confidence {
+      color: #e7dac0;
+      font-size: 1.46rem;
+    }
+
+    .kpi-value.metric-dance {
+      color: #ece1cd;
+      font-size: 1.46rem;
     }
 
     .analysis-item {
@@ -898,6 +1049,86 @@
       0%, 100% { height: 16%; opacity: 0.65; }
       50% { height: 100%; opacity: 1; }
     }
+
+    .waveform-track {
+      border: 1px solid rgba(255, 201, 40, 0.26);
+      border-radius: 11px;
+      padding: 10px;
+      background: rgba(20, 15, 5, 0.92);
+      margin-top: 10px;
+    }
+
+    .waveform-track-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+      font-size: 0.84rem;
+      color: var(--text-secondary);
+    }
+
+    .waveform-canvas {
+      height: 78px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 201, 40, 0.2);
+      background: linear-gradient(180deg, rgba(255, 201, 40, 0.06), rgba(255, 201, 40, 0.02));
+      display: flex;
+      align-items: end;
+      gap: 2px;
+      padding: 6px;
+      overflow: hidden;
+    }
+
+    .wf-bar {
+      flex: 1 1 0;
+      border-radius: 999px 999px 2px 2px;
+      background: linear-gradient(180deg, #fff2bf 0%, #ffcf39 48%, #f5932f 100%);
+      opacity: 0.92;
+      min-height: 6%;
+      box-shadow: 0 0 10px rgba(255, 201, 40, 0.25);
+    }
+
+    .wf-structure {
+      margin-top: 9px;
+      display: flex;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 201, 40, 0.22);
+      overflow: hidden;
+      min-height: 42px;
+    }
+
+    .wf-seg {
+      display: grid;
+      align-content: center;
+      gap: 2px;
+      padding: 4px 6px;
+      border-right: 1px solid rgba(0, 0, 0, 0.2);
+      font-size: 0.68rem;
+      color: #1c1404;
+      background: rgba(255, 201, 40, 0.45);
+    }
+
+    .wf-seg:last-child {
+      border-right: none;
+    }
+
+    .wf-seg strong {
+      font-size: 0.72rem;
+      line-height: 1.05;
+    }
+
+    .wf-seg small {
+      font-size: 0.65rem;
+      line-height: 1;
+      opacity: 0.85;
+    }
+
+    .wf-seg.seg-intro { background: #f8d57a; }
+    .wf-seg.seg-build { background: #ffd264; }
+    .wf-seg.seg-drop { background: #ffad52; }
+    .wf-seg.seg-break { background: #f2cc89; }
+    .wf-seg.seg-outro { background: #e7c272; }
 
     .typing-indicator {
       display: inline-flex;
@@ -1108,6 +1339,45 @@
     .live-next-row span {
       color: var(--text-secondary);
       font-size: 0.82rem;
+    }
+
+    .live-setup {
+      display: grid;
+      gap: 8px;
+      width: min(740px, 100%);
+      margin: 0 auto;
+    }
+
+    .live-setup-step {
+      border-radius: 10px;
+      border: 1px solid rgba(255, 201, 40, 0.26);
+      background: rgba(19, 14, 4, 0.92);
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 0.86rem;
+      color: var(--text-secondary);
+    }
+
+    .live-setup-step strong {
+      color: var(--text-primary);
+    }
+
+    .live-setup-step .state {
+      border-radius: 999px;
+      border: 1px solid rgba(255, 201, 40, 0.3);
+      padding: 4px 9px;
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .live-setup-step.ready .state {
+      border-color: rgba(150, 223, 117, 0.52);
+      color: #d8ffc6;
+      background: rgba(21, 74, 27, 0.45);
     }
 
     .slide-alert {
@@ -2162,17 +2432,29 @@
     <main class="main-content" id="mainContent">
       <section class="screen active" id="now-playing">
         <h1 class="screen-title">Lecture en cours</h1>
+        <details class="pole-help" open>
+          <summary>Guide du pôle • Lecture en cours <span>Ouvrir / Réduire</span></summary>
+          <div class="pole-help-body">
+            <div>Ce pôle sert à piloter ton set en temps réel: track live, prochain morceau, compatibilité et coaching instantané.</div>
+            <div class="pole-help-steps">
+              <div class="pole-help-step"><strong>1.</strong> Vérifie que le bridge Serato est connecté (status top bar).</div>
+              <div class="pole-help-step"><strong>2.</strong> Charge Deck A puis Deck B dans Serato pour activer les conseils live.</div>
+              <div class="pole-help-step"><strong>3.</strong> Surveille BPM/clé/énergie et la timeline structurelle pour caler tes entrées.</div>
+              <div class="pole-help-step"><strong>4.</strong> Clique sur les suggestions IA dans l'app pour préparer la transition suivante.</div>
+            </div>
+          </div>
+        </details>
         <div class="grid-2">
           <article class="card">
             <div class="card-title">Deck A</div>
             <div class="track-name" id="nowTrackName">-</div>
             <div class="track-artist" id="nowTrackArtist">-</div>
             <div class="row">
-              <span class="chip" id="nowBpm">-- BPM</span>
-              <span class="chip" id="nowKey">--</span>
-              <span class="chip" id="nowNote">Note --/10</span>
-              <span class="chip" id="nowEnergy">Energy --</span>
-              <span class="chip" id="nowGenre">--</span>
+              <span class="chip metric-chip metric-bpm" id="nowBpm">-- BPM</span>
+              <span class="chip metric-chip metric-key" id="nowKey">--</span>
+              <span class="chip metric-chip metric-note" id="nowNote">Note --/10</span>
+              <span class="chip metric-chip metric-energy" id="nowEnergy">Énergie --</span>
+              <span class="chip metric-chip metric-genre" id="nowGenre">--</span>
             </div>
             <div class="wave-menu playing" id="deckAWave" aria-label="Deck A visualizer">
               <span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span>
@@ -2184,7 +2466,7 @@
             </div>
             <div class="row" style="margin-top:8px; justify-content:space-between;">
               <small id="deckPosition">0:00</small>
-              <small id="deckRemaining">Remaining 0:00</small>
+              <small id="deckRemaining">Restant 0:00</small>
             </div>
           </article>
 
@@ -2193,9 +2475,9 @@
             <div class="track-name" id="nextTrackName">-</div>
             <div class="track-artist" id="nextTrackArtist">-</div>
             <div class="row">
-              <span class="chip" id="nextBpm">-- BPM</span>
-              <span class="chip" id="nextKey">--</span>
-              <span class="chip" id="nextNote">Note --/10</span>
+              <span class="chip metric-chip metric-bpm" id="nextBpm">-- BPM</span>
+              <span class="chip metric-chip metric-key" id="nextKey">--</span>
+              <span class="chip metric-chip metric-note" id="nextNote">Note --/10</span>
             </div>
             <div class="wave-menu playing" id="deckBWave" aria-label="Deck B visualizer">
               <span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span>
@@ -2216,6 +2498,26 @@
         </div>
 
         <article class="card" style="margin-top:14px;">
+          <div class="card-title">Waveform & Structure Morceaux</div>
+          <div class="waveform-track">
+            <div class="waveform-track-head">
+              <strong>Deck A</strong>
+              <span id="nowWaveformALabel">Timeline en attente...</span>
+            </div>
+            <div class="waveform-canvas" id="nowWaveformA"></div>
+            <div class="wf-structure" id="nowStructureA"></div>
+          </div>
+          <div class="waveform-track">
+            <div class="waveform-track-head">
+              <strong>Deck B / Next</strong>
+              <span id="nowWaveformBLabel">Timeline en attente...</span>
+            </div>
+            <div class="waveform-canvas" id="nowWaveformB"></div>
+            <div class="wf-structure" id="nowStructureB"></div>
+          </div>
+        </article>
+
+        <article class="card" style="margin-top:14px;">
           <div class="card-title">Suggestions IA</div>
           <div class="results-grid" id="nowRecommendations"></div>
         </article>
@@ -2223,6 +2525,18 @@
 
       <section class="screen" id="library">
         <h1 class="screen-title">Intelligence Bibliothèque</h1>
+        <details class="pole-help">
+          <summary>Guide du pôle • Bibliothèque <span>Ouvrir / Réduire</span></summary>
+          <div class="pole-help-body">
+            <div>Recherche locale + internet. Ouvre la fiche IA d'un résultat, compare à ta bibliothèque, puis importe les tracks utiles.</div>
+            <div class="pole-help-steps">
+              <div class="pole-help-step"><strong>1.</strong> Lance une recherche (titre/artiste/BPM/clé/humeur).</div>
+              <div class="pole-help-step"><strong>2.</strong> Onglet <em>Recherche globale</em> → <strong>Fiche IA</strong> pour enrichir le morceau.</div>
+              <div class="pole-help-step"><strong>3.</strong> Clique <strong>Ouvrir Analyse</strong> pour l'analyse détaillée.</div>
+              <div class="pole-help-step"><strong>4.</strong> Clique <strong>Ajouter à ma bibliothèque</strong> pour l'utiliser dans Session/Transitions.</div>
+            </div>
+          </div>
+        </details>
         <article class="card">
           <div class="row">
             <input class="search-box" id="searchInput" type="text" placeholder="Recherche par titre, artiste, genre, BPM, clé (ex: techno 126 8A)" />
@@ -2290,6 +2604,17 @@
 
       <section class="screen" id="transitions">
         <h1 class="screen-title">Lab Transitions</h1>
+        <details class="pole-help">
+          <summary>Guide du pôle • Lab Transitions <span>Ouvrir / Réduire</span></summary>
+          <div class="pole-help-body">
+            <div>Calcule la meilleure transition entre deux tracks de ta bibliothèque avec recommandations actionnables.</div>
+            <div class="pole-help-steps">
+              <div class="pole-help-step"><strong>1.</strong> Choisis Track A (en cours) et Track B (suivant).</div>
+              <div class="pole-help-step"><strong>2.</strong> Clique <strong>ANALYSER</strong> pour obtenir score, difficulté et mix points.</div>
+              <div class="pole-help-step"><strong>3.</strong> Applique les points de mix (Start B / Mix Point / Drop Align) en live.</div>
+            </div>
+          </div>
+        </details>
         <article class="card">
           <div class="transition-layout" style="margin-bottom:10px;">
             <div class="form-field">
@@ -2321,6 +2646,17 @@
 
       <section class="screen" id="analysis">
         <h1 class="screen-title">Analyse Morceau</h1>
+        <details class="pole-help">
+          <summary>Guide du pôle • Analyse Morceau <span>Ouvrir / Réduire</span></summary>
+          <div class="pole-help-body">
+            <div>Vue complète Track DNA: BPM, clé, énergie, note, waveform et usages dans le set.</div>
+            <div class="pole-help-steps">
+              <div class="pole-help-step"><strong>1.</strong> Sélectionne un morceau local ou ouvre un résultat externe depuis Bibliothèque.</div>
+              <div class="pole-help-step"><strong>2.</strong> Lis les KPI en haut puis la timeline structurelle (intro/build/drop/break/outro).</div>
+              <div class="pole-help-step"><strong>3.</strong> Utilise les <em>Mix Intelligence hints</em> pour préparer ton timing DJ.</div>
+            </div>
+          </div>
+        </details>
         <article class="card" style="margin-bottom: 12px;">
           <div class="form-field">
             <label class="label" for="analysisTrackSelect">Morceau</label>
@@ -2346,10 +2682,33 @@
           <div class="card-title">Mix Intelligence</div>
           <div class="coach-list" id="analysisMixHints"></div>
         </article>
+        <article class="card" style="margin-top:12px;">
+          <div class="card-title">Waveform & Timeline du morceau</div>
+          <div class="waveform-track">
+            <div class="waveform-track-head">
+              <strong>Structure complète</strong>
+              <span id="analysisWaveformLabel">Timeline en attente...</span>
+            </div>
+            <div class="waveform-canvas" id="analysisWaveform"></div>
+            <div class="wf-structure" id="analysisStructure"></div>
+          </div>
+        </article>
       </section>
 
       <section class="screen" id="history">
         <h1 class="screen-title">Session & Historique</h1>
+        <details class="pole-help">
+          <summary>Guide du pôle • Session & Historique <span>Ouvrir / Réduire</span></summary>
+          <div class="pole-help-body">
+            <div>Compose ta playlist de set, calcule les transitions en chaîne, et pilote la connexion Serato.</div>
+            <div class="pole-help-steps">
+              <div class="pole-help-step"><strong>1.</strong> Ajoute les tracks dans <em>Mode Session</em> pour construire ton ordre.</div>
+              <div class="pole-help-step"><strong>2.</strong> Vérifie les propositions IA de transition entre chaque morceau.</div>
+              <div class="pole-help-step"><strong>3.</strong> Clique <strong>Connecter Serato</strong> puis démarre la session.</div>
+              <div class="pole-help-step"><strong>4.</strong> Exporte JSON/CSV à la fin pour archivage client.</div>
+            </div>
+          </div>
+        </details>
         <article class="card" style="margin-bottom:12px;">
           <div class="card-title">Mode Session (playlist DJ)</div>
           <div class="row" style="align-items:flex-start; gap:12px;">
@@ -2427,6 +2786,17 @@
 
       <section class="screen" id="account">
         <h1 class="screen-title">Univers Utilisateur</h1>
+        <details class="pole-help">
+          <summary>Guide du pôle • Compte DJ <span>Ouvrir / Réduire</span></summary>
+          <div class="pole-help-body">
+            <div>Gère profil DJ, préférences, favoris, prep crate, et suivi cloud des sessions.</div>
+            <div class="pole-help-steps">
+              <div class="pole-help-step"><strong>1.</strong> Mets à jour ton nom DJ et tes infos profil.</div>
+              <div class="pole-help-step"><strong>2.</strong> Contrôle le statut cloud et le temps de session.</div>
+              <div class="pole-help-step"><strong>3.</strong> Nettoie wishlist/prep crate pour garder un workflow propre.</div>
+            </div>
+          </div>
+        </details>
         <div class="account-grid">
           <article class="card">
             <div class="card-title">Profil Utilisateur</div>

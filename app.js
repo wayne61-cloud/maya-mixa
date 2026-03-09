@@ -111,6 +111,12 @@
     nowRecommendations: document.getElementById("nowRecommendations"),
     deckAWave: document.getElementById("deckAWave"),
     deckBWave: document.getElementById("deckBWave"),
+    nowWaveformA: document.getElementById("nowWaveformA"),
+    nowWaveformB: document.getElementById("nowWaveformB"),
+    nowStructureA: document.getElementById("nowStructureA"),
+    nowStructureB: document.getElementById("nowStructureB"),
+    nowWaveformALabel: document.getElementById("nowWaveformALabel"),
+    nowWaveformBLabel: document.getElementById("nowWaveformBLabel"),
 
     searchInput: document.getElementById("searchInput"),
     searchSubmitBtn: document.getElementById("searchSubmitBtn"),
@@ -159,6 +165,9 @@
     analysisMixHints: document.getElementById("analysisMixHints"),
     analysisEnergyRing: document.getElementById("analysisEnergyRing"),
     analysisEnergyRingValue: document.getElementById("analysisEnergyRingValue"),
+    analysisWaveform: document.getElementById("analysisWaveform"),
+    analysisStructure: document.getElementById("analysisStructure"),
+    analysisWaveformLabel: document.getElementById("analysisWaveformLabel"),
 
     historyAvg: document.getElementById("historyAvg"),
     historyTransitions: document.getElementById("historyTransitions"),
@@ -747,6 +756,121 @@
     const speed = clamp(1.9 - (normalizedBpm - 70) * 0.012, 0.52, 1.85);
     node.style.setProperty("--wave-speed", `${speed.toFixed(2)}s`);
     node.classList.toggle("playing", Boolean(isPlaying));
+  }
+
+  function hashString32(value) {
+    let hash = 2166136261;
+    const text = String(value || "");
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function seededRandom(seed) {
+    let t = seed >>> 0;
+    return () => {
+      t += 0x6d2b79f5;
+      let v = t;
+      v = Math.imul(v ^ (v >>> 15), v | 1);
+      v ^= v + Math.imul(v ^ (v >>> 7), v | 61);
+      return ((v ^ (v >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function computeTrackStructure(track) {
+    const duration = Math.max(120, Number(track?.duration || 360));
+    const energy = clamp(Number(track?.energy || track?.note || 6), 1, 10);
+    const buildBoost = clamp((energy - 5) / 8, -0.22, 0.22);
+    const dropBoost = clamp((energy - 5) / 6, -0.25, 0.25);
+    const base = [
+      { key: "intro", label: "Intro", weight: 0.2 - buildBoost * 0.35 },
+      { key: "build", label: "Build", weight: 0.19 + buildBoost * 0.35 },
+      { key: "drop", label: "Drop", weight: 0.23 + dropBoost * 0.42 },
+      { key: "break", label: "Break", weight: 0.16 - dropBoost * 0.2 },
+      { key: "outro", label: "Outro", weight: 0.22 - buildBoost * 0.05 },
+    ].map((seg) => ({ ...seg, weight: clamp(seg.weight, 0.08, 0.38) }));
+
+    const totalWeight = base.reduce((acc, seg) => acc + seg.weight, 0) || 1;
+    let cursor = 0;
+    return base.map((seg, idx) => {
+      const pctRaw = (seg.weight / totalWeight) * 100;
+      const startPct = cursor;
+      const pct = idx === base.length - 1 ? Math.max(4, 100 - cursor) : Math.max(8, Math.round(pctRaw * 10) / 10);
+      const endPct = startPct + pct;
+      const startSec = Math.round((duration * startPct) / 100);
+      const endSec = Math.round((duration * endPct) / 100);
+      cursor += pct;
+      return { ...seg, pct, startPct, endPct, startSec, endSec };
+    });
+  }
+
+  function buildWaveformSamples(track, points = 86) {
+    const bpm = clamp(Number(track?.bpm || 124), 90, 160);
+    const energy = clamp(Number(track?.energy || track?.note || 6), 1, 10);
+    const seed = hashString32(`${track?.id || ""}|${track?.title || ""}|${track?.artist || ""}|${bpm.toFixed(2)}|${energy.toFixed(2)}`);
+    const rnd = seededRandom(seed);
+    const structure = computeTrackStructure(track);
+    const out = [];
+    for (let i = 0; i < points; i += 1) {
+      const x = i / Math.max(1, points - 1);
+      const phaseA = Math.sin((x * bpm) / 5.4);
+      const phaseB = Math.sin((x * bpm) / 2.2 + 0.7);
+      const noise = (rnd() - 0.5) * 0.52;
+      const progressPct = x * 100;
+      const seg = structure.find((item) => progressPct >= item.startPct && progressPct < item.endPct) || structure[structure.length - 1];
+      const segBoost = seg?.key === "drop" ? 0.28 : seg?.key === "build" ? 0.14 : seg?.key === "break" ? -0.12 : 0.02;
+      const raw = 0.46 + phaseA * 0.2 + phaseB * 0.16 + noise + (energy - 5) * 0.03 + segBoost;
+      out.push(clamp(raw, 0.06, 1));
+    }
+    return out;
+  }
+
+  function renderWaveformCanvas(node, samples) {
+    if (!node) return;
+    if (!samples?.length) {
+      node.innerHTML = "";
+      return;
+    }
+    node.innerHTML = samples
+      .map((value) => `<span class="wf-bar" style="height:${Math.round(clamp(value, 0.06, 1) * 100)}%"></span>`)
+      .join("");
+  }
+
+  function renderStructureSegments(node, structure) {
+    if (!node) return;
+    if (!structure?.length) {
+      node.innerHTML = "";
+      return;
+    }
+    node.innerHTML = structure
+      .map(
+        (seg) => `
+      <span class="wf-seg seg-${seg.key}" style="width:${seg.pct}%;">
+        <strong>${esc(seg.label)}</strong>
+        <small>${formatTime(seg.startSec)}-${formatTime(seg.endSec)}</small>
+      </span>
+    `
+      )
+      .join("");
+  }
+
+  function renderTrackWaveform(track, waveNode, structureNode, labelNode) {
+    if (!waveNode || !structureNode) return;
+    if (!track) {
+      renderWaveformCanvas(waveNode, []);
+      renderStructureSegments(structureNode, []);
+      if (labelNode) labelNode.textContent = "Aucune data";
+      return;
+    }
+    const samples = buildWaveformSamples(track);
+    const structure = computeTrackStructure(track);
+    renderWaveformCanvas(waveNode, samples);
+    renderStructureSegments(structureNode, structure);
+    if (labelNode) {
+      labelNode.textContent = `${Number(track.bpm || 0).toFixed(2)} BPM • ${track.camelot_key || track.musical_key || "-"} • ${formatTime(track.duration || 0)}`;
+    }
   }
 
   function trackPassesFilters(track) {
@@ -1408,10 +1532,10 @@
         <div style="font-size:1.02rem; font-weight:760;">${esc(track.title)}</div>
         <div style="color:var(--text-secondary); margin-top:4px;">${esc(track.artist)}</div>
         <div class="row" style="margin-top:8px;">
-          <span class="chip">${esc(track.genre)}</span>
-          <span class="chip">${Number(track.bpm).toFixed(2)} BPM</span>
-          <span class="chip">${esc(track.camelot_key || track.musical_key || "-")}</span>
-          <span class="chip">${Number(track.note).toFixed(1)}/10</span>
+          <span class="chip metric-chip metric-genre">${esc(track.genre)}</span>
+          <span class="chip metric-chip metric-bpm">${Number(track.bpm).toFixed(2)} BPM</span>
+          <span class="chip metric-chip metric-key">${esc(track.camelot_key || track.musical_key || "-")}</span>
+          <span class="chip metric-chip metric-note">${Number(track.note).toFixed(1)}/10</span>
         </div>
         <div style="font-size:0.77rem; color:var(--text-secondary); margin-top:8px;">${esc((track.tags || []).join(" • "))}</div>
         <div class="compat-badge ${compatClass(track.note * 10)}">Confiance analyse ${((track.features?.analysis_confidence || 0) * 100).toFixed(0)}%</div>
@@ -1440,10 +1564,10 @@
         <div style="font-size:1.02rem; font-weight:760;">${esc(track.title)}</div>
         <div style="color:var(--text-secondary); margin-top:4px;">${esc(track.artist)}</div>
         <div class="row" style="margin-top:8px;">
-          <span class="chip">${esc(track.genre || "unknown")}</span>
-          <span class="chip">${track.bpm ? `${Number(track.bpm).toFixed(2)} BPM` : "BPM est."}</span>
-          <span class="chip">${esc(track.camelot_key || track.musical_key || "Key est.")}</span>
-          <span class="chip">${track.note ? `${Number(track.note).toFixed(1)}/10` : "Note est."}</span>
+          <span class="chip metric-chip metric-genre">${esc(track.genre || "unknown")}</span>
+          <span class="chip metric-chip metric-bpm">${track.bpm ? `${Number(track.bpm).toFixed(2)} BPM` : "BPM est."}</span>
+          <span class="chip metric-chip metric-key">${esc(track.camelot_key || track.musical_key || "Key est.")}</span>
+          <span class="chip metric-chip metric-note">${track.note ? `${Number(track.note).toFixed(1)}/10` : "Note est."}</span>
           <span class="chip">IA ${(Number(track?.intelligence?.features?.analysis_confidence || track?.confidence || 0) * 100).toFixed(0)}%</span>
         </div>
         <div style="font-size:0.77rem; color:var(--text-secondary); margin-top:8px;">source: ${esc(track.source)}</div>
@@ -1476,8 +1600,8 @@
         <div style="font-size:1.02rem; font-weight:760;">${esc(row.track.title)}</div>
         <div style="color:var(--text-secondary); margin-top:4px;">${esc(row.track.artist)}</div>
         <div class="row" style="margin-top:8px;">
-          <span class="chip">${Number(row.track.bpm).toFixed(2)} BPM</span>
-          <span class="chip">${esc(row.track.camelot_key || row.track.musical_key || "-")}</span>
+          <span class="chip metric-chip metric-bpm">${Number(row.track.bpm).toFixed(2)} BPM</span>
+          <span class="chip metric-chip metric-key">${esc(row.track.camelot_key || row.track.musical_key || "-")}</span>
         </div>
         <div class="compat-badge ${compatClass(row.compatibility)}">${row.compatibility}% • ${row.difficulty}</div>
         <div class="track-reveal">Conseil transition: start ${formatTime(row.analysis.mixPoints.startB)} • mix ${formatTime(row.analysis.mixPoints.mixPoint)}.</div>
@@ -1898,6 +2022,7 @@
       el.analysisDna.innerHTML = `<div class="analysis-item"><span style="color:var(--text-secondary)">Aucun morceau analysé</span><strong>-</strong></div>`;
       el.analysisOutlook.innerHTML = "";
       el.analysisMixHints.innerHTML = "";
+      renderTrackWaveform(null, el.analysisWaveform, el.analysisStructure, el.analysisWaveformLabel);
       return;
     }
 
@@ -1906,20 +2031,21 @@
     const keyValue = track.camelot_key || track.musical_key || "-";
     const durationValue = Number(track.duration || 0);
     const kpis = [
-      ["BPM", Number(track.bpm).toFixed(2)],
-      ["Clé", keyValue],
-      ["Note", `${Number(track.note).toFixed(1)}/10`, true],
-      ["Durée", formatTime(durationValue)],
-      ["Confiance", `${(confidence * 100).toFixed(0)}%`],
-      ["Dance", `${Number(features.danceability || 0).toFixed(1)}/10`],
+      { label: "BPM", value: Number(track.bpm).toFixed(2), tone: "bpm" },
+      { label: "Clé", value: keyValue, tone: "key" },
+      { label: "Énergie", value: `${Number(track.energy || 0).toFixed(1)}/10`, tone: "energy" },
+      { label: "Note", value: `${Number(track.note).toFixed(1)}/10`, tone: "note" },
+      { label: "Durée", value: formatTime(durationValue), tone: "confidence" },
+      { label: "Confiance", value: `${(confidence * 100).toFixed(0)}%`, tone: "confidence" },
+      { label: "Dance", value: `${Number(features.danceability || 0).toFixed(1)}/10`, tone: "dance" },
     ];
 
     el.analysisKpis.innerHTML = kpis
       .map(
-        ([label, value, special]) => `
-      <div class="kpi-tile">
-        <div class="kpi-label">${label}</div>
-        <div class="kpi-value ${special ? "note" : ""}">${esc(value)}</div>
+        (item) => `
+      <div class="kpi-tile metric-${esc(item.tone)}">
+        <div class="kpi-label">${esc(item.label)}</div>
+        <div class="kpi-value metric-${esc(item.tone)}">${esc(item.value)}</div>
       </div>
     `
       )
@@ -2009,6 +2135,7 @@
     ];
 
     el.analysisMixHints.innerHTML = hints.map((tip) => `<div class="coach-tip">${esc(tip)}</div>`).join("");
+    renderTrackWaveform(track, el.analysisWaveform, el.analysisStructure, el.analysisWaveformLabel);
   }
 
   function renderNowPlaying() {
@@ -2024,6 +2151,8 @@
       el.nowRecommendations.innerHTML = `<div class="track-card">Aucune recommandation pour le moment.</div>`;
       setWaveMenuState(el.deckAWave, 0, false);
       setWaveMenuState(el.deckBWave, 0, false);
+      renderTrackWaveform(null, el.nowWaveformA, el.nowStructureA, el.nowWaveformALabel);
+      renderTrackWaveform(null, el.nowWaveformB, el.nowStructureB, el.nowWaveformBLabel);
       return;
     }
 
@@ -2049,6 +2178,9 @@
       el.nextKey.textContent = next.camelot_key || next.musical_key || "-";
       el.nextNote.textContent = `Note ${Number(next.note || 0).toFixed(1)}/10`;
     }
+
+    renderTrackWaveform(current, el.nowWaveformA, el.nowStructureA, el.nowWaveformALabel);
+    renderTrackWaveform(next, el.nowWaveformB, el.nowStructureB, el.nowWaveformBLabel);
 
     setWaveMenuState(el.deckAWave, Number(deckA?.bpm || current.bpm || 0), true);
     setWaveMenuState(el.deckBWave, Number(deckB?.bpm || next?.bpm || 0), Boolean(next));
@@ -2077,10 +2209,10 @@
         <div style="font-weight:700">${esc(item.track.title)}</div>
         <div style="color:var(--text-secondary); font-size:0.84rem">${esc(item.track.artist)}</div>
         <div class="row" style="margin-top:8px;">
-          <span class="chip">${Number(item.track.bpm).toFixed(2)} BPM</span>
-          <span class="chip">${esc(item.track.camelot_key || item.track.musical_key || "-")}</span>
-          <span class="chip">${Number(item.track.note).toFixed(1)}/10</span>
-          <span class="chip">${esc(item.track.genre)}</span>
+          <span class="chip metric-chip metric-bpm">${Number(item.track.bpm).toFixed(2)} BPM</span>
+          <span class="chip metric-chip metric-key">${esc(item.track.camelot_key || item.track.musical_key || "-")}</span>
+          <span class="chip metric-chip metric-note">${Number(item.track.note).toFixed(1)}/10</span>
+          <span class="chip metric-chip metric-genre">${esc(item.track.genre)}</span>
         </div>
         <div class="compat-badge ${compatClass(item.compatibility)}">${item.compatibility}% • ${esc(item.difficulty)}</div>
         <div class="track-reveal">Survole pour prévisualiser le blend et clique dans Bibliothèque pour l'analyse complète.</div>
@@ -2090,10 +2222,47 @@
       .join("");
   }
 
+  function liveSetupChecklist() {
+    const bridgeReady = state.serato?.status === "connected";
+    const deckAReady = Boolean(state.serato?.deckA?.track_id || state.serato?.deckA?.title);
+    const deckBReady = Boolean(state.serato?.deckB?.track_id || state.serato?.deckB?.title);
+    const coachReady = Boolean(state.liveCoach);
+    const rows = [
+      { ok: bridgeReady, label: "1. Connect Serato", hint: bridgeReady ? "Bridge connecté" : "Clique Connecter Serato dans Session" },
+      { ok: deckAReady, label: "2. Load Deck A", hint: deckAReady ? "Deck A détecté" : "Charge un morceau sur Deck A" },
+      { ok: deckBReady, label: "3. Load Deck B", hint: deckBReady ? "Deck B détecté" : "Charge un morceau sur Deck B" },
+      { ok: coachReady, label: "4. Start Live Coach", hint: coachReady ? "Coach live actif" : "Lance mode LIVE quand decks A/B sont chargés" },
+    ];
+    return `<div class="live-setup">${rows
+      .map(
+        (row) => `
+      <div class="live-setup-step ${row.ok ? "ready" : ""}">
+        <strong>${esc(row.label)}</strong>
+        <span class="state">${row.ok ? "OK" : "À faire"}</span>
+      </div>
+      <div class="coach-tip" style="margin-top:-4px;">${esc(row.hint)}</div>
+    `
+      )
+      .join("")}</div>`;
+  }
+
   function renderLiveOverlay() {
     const deckA = state.serato.deckA;
     const current = currentDeckTrack(deckA) || state.tracks[0] || null;
-    if (!current) return;
+    if (!current) {
+      el.liveTrackName.textContent = "Charge un track sur Deck A";
+      el.liveBpm.textContent = "-- BPM";
+      el.liveKey.textContent = "--";
+      el.liveNote.textContent = "Note --/10";
+      el.liveEnergy.textContent = "Énergie --";
+      el.liveMixWindow.textContent = "Coach live indisponible";
+      el.liveCountdown.textContent = "Checklist live à suivre";
+      el.liveAlert.textContent = "Maya suggère: connecte Serato puis charge Deck A et Deck B.";
+      el.liveAlert.classList.add("show");
+      el.liveCoachList.innerHTML = liveSetupChecklist();
+      el.liveSuggestions.innerHTML = "";
+      return;
+    }
 
     el.liveTrackName.textContent = current.title;
     el.liveBpm.textContent = `${Number(deckA?.bpm || current.bpm || 0).toFixed(2)} BPM`;
@@ -2104,10 +2273,10 @@
     const coach = state.liveCoach;
     if (!coach) {
       el.liveMixWindow.textContent = "Coach live indisponible";
-      el.liveCountdown.textContent = "Connecte Serato et charge les decks A/B";
-      el.liveAlert.textContent = "Maya suggère: prépare le deck B.";
-      el.liveAlert.classList.remove("show");
-      el.liveCoachList.innerHTML = "";
+      el.liveCountdown.textContent = "Connecte Serato + charge Deck A/B pour activer le coaching";
+      el.liveAlert.textContent = "Maya suggère: suis les 4 étapes de setup live.";
+      el.liveAlert.classList.add("show");
+      el.liveCoachList.innerHTML = liveSetupChecklist();
       el.liveSuggestions.innerHTML = "";
       return;
     }
@@ -2295,6 +2464,18 @@
       renderNowPlaying();
       renderLiveOverlay();
       updateTopStatus();
+      if (el.wsStatusDetail) {
+        const bridgeReady = state.serato?.status === "connected";
+        const deckAReady = Boolean(state.serato?.deckA?.track_id || state.serato?.deckA?.title);
+        const deckBReady = Boolean(state.serato?.deckB?.track_id || state.serato?.deckB?.title);
+        if (!bridgeReady) {
+          el.wsStatusDetail.textContent =
+            "1 Connect Serato • 2 Load Deck A • 3 Load Deck B • 4 Start live coach (mode LIVE).";
+        } else if (!deckAReady || !deckBReady) {
+          el.wsStatusDetail.textContent =
+            `Serato connecté. ${deckAReady ? "Deck A OK" : "Load Deck A"} • ${deckBReady ? "Deck B OK" : "Load Deck B"} • active ensuite le mode LIVE.`;
+        }
+      }
     } catch (error) {
       console.error(error);
     }
@@ -2485,11 +2666,12 @@
 
   async function autoConfigureSeratoBridge(force = false) {
     const now = Date.now();
-    if (!force && now - Number(state.seratoAutoConnectAt || 0) < 25000) return;
+    const retryMs = state.serato?.status === "connected" ? 22000 : state.liveMode ? 3500 : 7000;
+    if (!force && now - Number(state.seratoAutoConnectAt || 0) < retryMs) return;
     state.seratoAutoConnectAt = now;
 
     const seenAtMs = Date.parse(state.serato?.lastSeen || "");
-    if (!force && state.serato?.status === "connected" && Number.isFinite(seenAtMs) && now - seenAtMs < 15000) return;
+    if (!force && state.serato?.status === "connected" && Number.isFinite(seenAtMs) && now - seenAtMs < 12000) return;
 
     try {
       await api("POST", "/api/serato/connect", { mode: "push", ws_url: "", history_path: "", feed_path: "" });
