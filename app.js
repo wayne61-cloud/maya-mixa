@@ -3002,7 +3002,7 @@
     const openaiText = state.ai.openaiEnabled
       ? state.ai.openaiConnected
         ? "OpenAI connecté"
-        : "OpenAI configuré (test en attente)"
+        : "OpenAI indisponible"
       : "OpenAI optionnel";
     const internetText = state.ai?.internetEnrichment?.active ? "internet metadata actif" : "internet metadata off";
     const aiText = `IA runtime actif • moteur local ${state.ai.localModelActive ? "actif" : "off"} • ${openaiText} • ${internetText}`;
@@ -3126,7 +3126,7 @@
 
   async function refreshAiStatus() {
     try {
-      state.ai = await api("GET", "/api/ai/status");
+      state.ai = await api("GET", "/api/ai/status?test_remote=true");
       updateTopStatus();
     } catch (error) {
       state.ai = {

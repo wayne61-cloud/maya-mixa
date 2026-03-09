@@ -1875,7 +1875,7 @@ class AIService:
             response = self.client.responses.create(
                 model=self.openai_model,
                 input="Reply with: ok",
-                max_output_tokens=4,
+                max_output_tokens=32,
             )
             text = (response.output_text or "").strip().lower()
             status["openaiConnected"] = "ok" in text
