@@ -226,11 +226,16 @@ Without these credentials, frontend buttons remain visible but disabled and prov
 - `GET /api/account/dashboard` returns profile summary, favorites, session runtime, and AI tips
 - `GET /api/cloud/status` verifies DB persistence/runtime info
 
-Real native Serato deck telemetry still requires a local adapter/feed running on the DJ machine.
+### Serato desktop auto-sync (client flow)
 
-### Cloud relay quick start (for a remote client)
+- In the packaged Electron app, no manual relay command is required.
+- After DJ login, Maya starts a local history relay automatically (default scan paths: `~/Music/_Serato_/History/Sessions` then fallbacks).
+- Bridge mode is forced to `push` and deck updates are posted automatically to the cloud API.
+- On logout, the relay is stopped and bridge state is cleaned.
 
-1. Run the local relay on the DJ machine (no DevTools token copy required):
+### Fallback CLI relay (only if not using Electron)
+
+Use this only for browser-only usage:
 
 ```bash
 npm run serato:history:push -- \
@@ -238,16 +243,6 @@ npm run serato:history:push -- \
   --login dj_client_id \
   --history "~/Music/_Serato_/History/Sessions"
 ```
-
-2. The script auto-connects bridge mode `push`; in the app you should then see Serato status become `connected`.
-
-Optional:
-
-- `--token YOUR_AUTH_TOKEN` if you want to pass an existing token
-- `--no-auto-register` to forbid automatic account creation when login does not exist
-- `--dj-name "DJ Name"` used only when auto-register creates the account
-
-This allows cloud backend + local Serato data without giving cloud direct filesystem access.
 
 ## 13) Optional AI enhancement
 
