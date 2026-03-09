@@ -51,6 +51,7 @@
     recommendations: [],
     activeTransition: null,
     liveCoach: null,
+    seratoRelay: { socket: null, wsUrl: "", mode: "none", connected: false, forwarding: false },
 
     serato: { status: "disconnected", deckA: null, deckB: null, mode: "none", lastSeen: null, lastError: "" },
     history: { averageCompatibility: 0, transitionsCount: 0, playsCount: 0, eventsCount: 0, events: [], externalSavedCount: 0 },
@@ -571,6 +572,7 @@
   }
 
   function forceLogoutUi(message = "Session expirée. Reconnecte-toi.") {
+    stopSeratoRelay();
     persistAuthToken("");
     setCurrentUser(null);
     stopPollers();
@@ -626,6 +628,11 @@
     el.toast.classList.add("show");
     clearTimeout(showToast.timer);
     showToast.timer = setTimeout(() => el.toast.classList.remove("show"), 1800);
+  }
+
+  function on(node, eventName, handler) {
+    if (!node) return;
+    node.addEventListener(eventName, handler);
   }
 
   function clamp(value, low, high) {
@@ -1156,6 +1163,15 @@
   }
 
   function ensureSelectOptions() {
+    if (!state.tracks.length) {
+      const emptyOption = `<option value="">No local tracks yet</option>`;
+      if (el.trackASelect) el.trackASelect.innerHTML = emptyOption;
+      if (el.trackBSelect) el.trackBSelect.innerHTML = emptyOption;
+      if (el.analysisTrackSelect) el.analysisTrackSelect.innerHTML = emptyOption;
+      if (el.analyzeBtn) el.analyzeBtn.disabled = true;
+      return;
+    }
+
     const options = state.tracks
       .map((track) => `<option value="${Number(track.id) || 0}">${esc(track.title)} - ${esc(track.artist)}</option>`)
       .join("");
@@ -1180,6 +1196,7 @@
       const fallback = state.tracks.find((track) => track.id !== Number(el.trackASelect.value));
       if (fallback) el.trackBSelect.value = String(fallback.id);
     }
+    if (el.analyzeBtn) el.analyzeBtn.disabled = false;
   }
 
   async function loadTracks() {
@@ -1806,7 +1823,10 @@
     const aiStatus = state.ai.openaiEnabled ? (state.ai.openaiConnected ? "connected" : "disconnected") : "connected";
     setStatusPill(el.socketStatus, el.socketStatusText, aiStatus, "AI", aiText);
 
-    const wsLine = `Bridge mode: ${state.serato.mode}. Status: ${state.serato.status}${state.serato.lastError ? ` (${state.serato.lastError})` : ""}`;
+    const relayInfo = state.seratoRelay?.wsUrl
+      ? ` • relay ${state.seratoRelay.connected ? "on" : "off"} (${state.seratoRelay.wsUrl})`
+      : "";
+    const wsLine = `Bridge mode: ${state.serato.mode}. Status: ${state.serato.status}${state.serato.lastError ? ` (${state.serato.lastError})` : ""}${relayInfo}`;
     el.wsStatusDetail.textContent = wsLine;
   }
 
@@ -1922,8 +1942,9 @@
       showToast("Library scan finished.");
     } catch (error) {
       console.error(error);
-      el.scanStatus.textContent = `Scan failed: ${String(error)}`;
-      showToast("Scan failed");
+      const msg = String(error.message || error);
+      el.scanStatus.textContent = `Scan failed: ${msg}`;
+      showToast(`Scan failed: ${msg}`);
     }
   }
 
@@ -1958,18 +1979,79 @@
     await syncAppleCatalog();
   }
 
+  function stopSeratoRelay() {
+    const socket = state.seratoRelay?.socket;
+    if (socket) {
+      try {
+        socket.onopen = null;
+        socket.onclose = null;
+        socket.onerror = null;
+        socket.onmessage = null;
+        socket.close();
+      } catch (_) {
+        // No-op.
+      }
+    }
+    state.seratoRelay = { socket: null, wsUrl: "", mode: "none", connected: false, forwarding: false };
+  }
+
+  async function startSeratoRelay(wsUrl) {
+    const endpoint = String(wsUrl || "").trim();
+    if (!endpoint) throw new Error("Local WebSocket URL required (example: ws://127.0.0.1:8787)");
+    stopSeratoRelay();
+    const socket = new WebSocket(endpoint);
+    state.seratoRelay = { socket, wsUrl: endpoint, mode: "relay_websocket", connected: false, forwarding: false };
+
+    socket.onopen = () => {
+      state.seratoRelay.connected = true;
+      showToast("Local Serato relay connected");
+    };
+    socket.onerror = () => {
+      state.seratoRelay.connected = false;
+      showToast("Local Serato relay error");
+    };
+    socket.onclose = () => {
+      state.seratoRelay.connected = false;
+    };
+    socket.onmessage = async (event) => {
+      let payload = null;
+      try {
+        payload = JSON.parse(event.data || "{}");
+      } catch (_) {
+        return;
+      }
+      if (!payload || typeof payload !== "object") return;
+      if (state.seratoRelay.forwarding) return;
+      state.seratoRelay.forwarding = true;
+      try {
+        await api("POST", "/api/serato/push", { payload, source: "browser_ws" });
+      } catch (_) {
+        // Bridge push failures should not crash UI.
+      } finally {
+        state.seratoRelay.forwarding = false;
+      }
+    };
+  }
+
   async function connectBridge() {
+    const selectedMode = el.seratoModeSelect?.value || "websocket";
+    const useRelay = selectedMode === "relay_websocket";
     const payload = {
-      mode: el.seratoModeSelect.value,
-      ws_url: (el.wsUrlInput.value || "").trim(),
-      history_path: (el.historyPathInput.value || "").trim(),
-      feed_path: (el.feedPathInput.value || "").trim(),
+      mode: useRelay ? "push" : selectedMode,
+      ws_url: String(el.wsUrlInput?.value || "").trim(),
+      history_path: String(el.historyPathInput?.value || "").trim(),
+      feed_path: String(el.feedPathInput?.value || "").trim(),
     };
 
     try {
+      if (useRelay) {
+        await startSeratoRelay(payload.ws_url);
+      } else {
+        stopSeratoRelay();
+      }
       state.serato = await api("POST", "/api/serato/connect", payload);
       updateTopStatus();
-      showToast(`Bridge connecting (${payload.mode})`);
+      showToast(`Bridge connecting (${selectedMode})`);
       await refreshSerato();
       await refreshLiveCoach();
       await refreshRecommendations();
@@ -1977,12 +2059,14 @@
       await refreshAccountDashboard();
     } catch (error) {
       console.error(error);
-      showToast("Bridge connection failed");
+      stopSeratoRelay();
+      showToast(`Bridge connection failed: ${String(error.message || error)}`);
     }
   }
 
   async function disconnectBridge() {
     try {
+      stopSeratoRelay();
       state.serato = await api("POST", "/api/serato/disconnect", {});
       state.liveCoach = null;
       updateTopStatus();
@@ -2050,7 +2134,7 @@
   }
 
   function bindLibraryDelegates() {
-    el.trackResults.addEventListener("click", (event) => {
+    on(el.trackResults, "click", (event) => {
       const card = event.target.closest("[data-local-track-id]");
       if (!card) return;
       const id = card.getAttribute("data-local-track-id");
@@ -2060,7 +2144,7 @@
       navigateTo("analysis");
     });
 
-    el.globalResults.addEventListener("click", (event) => {
+    on(el.globalResults, "click", (event) => {
       const card = event.target.closest("[data-external-track-id]");
       if (!card) return;
       const id = card.getAttribute("data-external-track-id");
@@ -2070,19 +2154,20 @@
   }
 
   function bindEvents() {
-    el.navItems.forEach((item) => item.addEventListener("click", () => navigateTo(item.dataset.screen)));
+    el.navItems.forEach((item) => on(item, "click", () => navigateTo(item.dataset.screen)));
 
-    el.mobileMenuBtn.addEventListener("click", () => el.sidebar.classList.toggle("open"));
+    on(el.mobileMenuBtn, "click", () => el.sidebar?.classList.toggle("open"));
 
     document.addEventListener("click", (event) => {
       if (window.innerWidth > 860) return;
+      if (!el.sidebar) return;
       if (!el.sidebar.contains(event.target) && event.target !== el.mobileMenuBtn) {
         el.sidebar.classList.remove("open");
       }
     });
 
-    el.liveToggle.addEventListener("click", () => toggleLive());
-    el.liveToggleSwitch?.addEventListener("change", (event) => {
+    on(el.liveToggle, "click", () => toggleLive());
+    on(el.liveToggleSwitch, "change", (event) => {
       toggleLive(Boolean(event.target?.checked));
     });
 
@@ -2102,14 +2187,14 @@
       button.addEventListener("click", () => setSearchTab(button.dataset.searchTab));
     });
 
-    el.searchInput.addEventListener("input", () => {
+    on(el.searchInput, "input", () => {
       clearTimeout(state.searchDebounce);
       state.searchDebounce = setTimeout(runUnifiedSearch, 280);
     });
-    el.searchSubmitBtn?.addEventListener("click", runUnifiedSearch);
-    el.appleSyncBtn?.addEventListener("click", syncAppleCatalog);
+    on(el.searchSubmitBtn, "click", runUnifiedSearch);
+    on(el.appleSyncBtn, "click", syncAppleCatalog);
 
-    [el.bpmFilterInput, el.keyFilterInput, el.energyFilterInput].forEach((input) => {
+    [el.bpmFilterInput, el.keyFilterInput, el.energyFilterInput].filter(Boolean).forEach((input) => {
       input.addEventListener("input", () => {
         renderLibraryLocal();
         renderLibraryGlobal();
@@ -2119,16 +2204,16 @@
 
     document.querySelectorAll("[data-quick-search]").forEach((button) => {
       button.addEventListener("click", () => {
-        el.searchInput.value = button.dataset.quickSearch || "";
+        if (el.searchInput) el.searchInput.value = button.dataset.quickSearch || "";
         runUnifiedSearch();
       });
     });
 
-    el.scanLibraryBtn.addEventListener("click", scanLibrary);
-    el.analyzeBtn.addEventListener("click", analyzeTransition);
-    el.analysisTrackSelect.addEventListener("change", renderAnalysis);
+    on(el.scanLibraryBtn, "click", scanLibrary);
+    on(el.analyzeBtn, "click", analyzeTransition);
+    on(el.analysisTrackSelect, "change", renderAnalysis);
 
-    el.trackASelect.addEventListener("change", () => {
+    on(el.trackASelect, "change", () => {
       if (el.trackASelect.value === el.trackBSelect.value) {
         const fallback = state.tracks.find((track) => track.id !== Number(el.trackASelect.value));
         if (fallback) el.trackBSelect.value = String(fallback.id);
@@ -2136,50 +2221,50 @@
       refreshRecommendations();
     });
 
-    el.trackBSelect.addEventListener("change", () => {
+    on(el.trackBSelect, "change", () => {
       if (el.trackASelect.value === el.trackBSelect.value) showToast("Track B must differ from Track A");
     });
 
-    el.wsConnectBtn.addEventListener("click", connectBridge);
-    el.wsDisconnectBtn.addEventListener("click", disconnectBridge);
+    on(el.wsConnectBtn, "click", connectBridge);
+    on(el.wsDisconnectBtn, "click", disconnectBridge);
 
-    el.startSessionBtn.addEventListener("click", startSession);
-    el.endSessionBtn.addEventListener("click", endSession);
-    el.exportJsonBtn.addEventListener("click", () => exportCurrent("json"));
-    el.exportCsvBtn.addEventListener("click", () => exportCurrent("csv"));
+    on(el.startSessionBtn, "click", startSession);
+    on(el.endSessionBtn, "click", endSession);
+    on(el.exportJsonBtn, "click", () => exportCurrent("json"));
+    on(el.exportCsvBtn, "click", () => exportCurrent("csv"));
 
-    el.externalSaveWishlistBtn.addEventListener("click", () => saveExternalTo("wishlist"));
-    el.externalSaveCrateBtn.addEventListener("click", () => saveExternalTo("prep_crate"));
-    el.externalTestLibraryBtn.addEventListener("click", testExternalWithLibrary);
-    el.externalFindSimilarBtn.addEventListener("click", findSimilarExternal);
+    on(el.externalSaveWishlistBtn, "click", () => saveExternalTo("wishlist"));
+    on(el.externalSaveCrateBtn, "click", () => saveExternalTo("prep_crate"));
+    on(el.externalTestLibraryBtn, "click", testExternalWithLibrary);
+    on(el.externalFindSimilarBtn, "click", findSimilarExternal);
 
-    el.authLoginTab?.addEventListener("click", () => setAuthTab("login"));
-    el.authRegisterTab?.addEventListener("click", () => setAuthTab("register"));
-    el.apiBaseSaveBtn?.addEventListener("click", saveApiBaseConfig);
-    el.apiBaseTestBtn?.addEventListener("click", testApiBaseConnection);
-    el.apiBaseInput?.addEventListener("keydown", (event) => {
+    on(el.authLoginTab, "click", () => setAuthTab("login"));
+    on(el.authRegisterTab, "click", () => setAuthTab("register"));
+    on(el.apiBaseSaveBtn, "click", saveApiBaseConfig);
+    on(el.apiBaseTestBtn, "click", testApiBaseConnection);
+    on(el.apiBaseInput, "keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
         saveApiBaseConfig();
       }
     });
-    el.googleAuthBtn?.addEventListener("click", () => startOAuthLogin("google"));
-    el.appleAuthBtn?.addEventListener("click", () => startOAuthLogin("apple"));
-    el.authLoginForm?.addEventListener("submit", loginSubmit);
-    el.authRegisterForm?.addEventListener("submit", registerSubmit);
-    el.forgotPasswordBtn?.addEventListener("click", openForgotFlow);
-    el.authForgotForm?.addEventListener("submit", forgotPasswordSubmit);
-    el.openResetTokenBtn?.addEventListener("click", () => openResetFlow());
-    el.forgotBackBtn?.addEventListener("click", () => setAuthTab("login"));
-    el.authResetForm?.addEventListener("submit", resetPasswordSubmit);
-    el.resetBackBtn?.addEventListener("click", () => setAuthTab("login"));
+    on(el.googleAuthBtn, "click", () => startOAuthLogin("google"));
+    on(el.appleAuthBtn, "click", () => startOAuthLogin("apple"));
+    on(el.authLoginForm, "submit", loginSubmit);
+    on(el.authRegisterForm, "submit", registerSubmit);
+    on(el.forgotPasswordBtn, "click", openForgotFlow);
+    on(el.authForgotForm, "submit", forgotPasswordSubmit);
+    on(el.openResetTokenBtn, "click", () => openResetFlow());
+    on(el.forgotBackBtn, "click", () => setAuthTab("login"));
+    on(el.authResetForm, "submit", resetPasswordSubmit);
+    on(el.resetBackBtn, "click", () => setAuthTab("login"));
 
-    el.openAccountBtn?.addEventListener("click", () => navigateTo("account"));
-    el.logoutBtn?.addEventListener("click", logoutSubmit);
-    el.profileSaveBtn?.addEventListener("click", saveProfile);
-    el.passwordSaveBtn?.addEventListener("click", changePassword);
-    el.adminRefreshUsersBtn?.addEventListener("click", refreshAdminUsers);
-    el.adminUsersTableBody?.addEventListener("click", (event) => {
+    on(el.openAccountBtn, "click", () => navigateTo("account"));
+    on(el.logoutBtn, "click", logoutSubmit);
+    on(el.profileSaveBtn, "click", saveProfile);
+    on(el.passwordSaveBtn, "click", changePassword);
+    on(el.adminRefreshUsersBtn, "click", refreshAdminUsers);
+    on(el.adminUsersTableBody, "click", (event) => {
       const button = event.target.closest("[data-admin-save]");
       if (!button) return;
       const row = button.closest("[data-admin-user-id]");

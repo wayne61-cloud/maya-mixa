@@ -84,6 +84,10 @@ APPLE_OAUTH_CLIENT_ID = os.getenv("MAYA_APPLE_CLIENT_ID", "").strip()
 APPLE_OAUTH_CLIENT_SECRET = os.getenv("MAYA_APPLE_CLIENT_SECRET", "").strip()
 APPLE_OAUTH_REDIRECT_URI = os.getenv("MAYA_APPLE_REDIRECT_URI", "").strip()
 AUTH_PASSWORDLESS = os.getenv("MAYA_AUTH_PASSWORDLESS", "true").strip().lower() in {"1", "true", "yes", "on"}
+SEED_NEW_USER_LIBRARY = os.getenv("MAYA_SEED_NEW_USER_LIBRARY", "false").strip().lower() in {"1", "true", "yes", "on"}
+SEED_BOOTSTRAP_ADMIN_LIBRARY = (
+    os.getenv("MAYA_SEED_BOOTSTRAP_ADMIN_LIBRARY", "true").strip().lower() in {"1", "true", "yes", "on"}
+)
 
 
 def parse_cors_origins() -> List[str]:
@@ -1030,6 +1034,21 @@ class Database:
                 (user_id, track_id, now_iso()),
             )
             self.conn.commit()
+
+    def unlink_virtual_default_tracks(self, user_id: int) -> int:
+        with self.lock:
+            cur = self.conn.execute(
+                """
+                DELETE FROM user_tracks
+                WHERE user_id = ?
+                  AND track_id IN (
+                    SELECT id FROM tracks WHERE file_path LIKE 'virtual://maya-default-library/%'
+                  )
+                """,
+                (user_id,),
+            )
+            self.conn.commit()
+            return int(cur.rowcount or 0)
 
     def upsert_track(self, track: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
@@ -2415,6 +2434,16 @@ class SeratoBridge:
             self.state["status"] = "connecting"
             self.state["lastError"] = ""
 
+        if mode == "push":
+            with self.lock:
+                self.state["status"] = "connected"
+            self.db.add_event(
+                "serato.connect",
+                {"mode": mode, "ws_url": ws_url, "history_path": history_path, "feed_path": feed_path},
+                user_id=self.user_id,
+            )
+            return self.get_state()
+
         self.stop_event.clear()
         self.worker = threading.Thread(target=self._run, daemon=True)
         self.worker.start()
@@ -2443,6 +2472,9 @@ class SeratoBridge:
                 self._run_history_mode(self.config.get("history_path", ""))
             elif mode == "feed_file":
                 self._run_feed_file_mode(self.config.get("feed_path", ""))
+            elif mode == "push":
+                while not self.stop_event.is_set():
+                    time.sleep(0.5)
             else:
                 raise ValueError("Unsupported bridge mode")
         except Exception as exc:  # noqa: BLE001
@@ -2575,6 +2607,17 @@ class SeratoBridge:
         track = payload.get("track", payload)
         self._update_deck(deck_name, track, source)
 
+    def ingest_payload(self, payload: Dict[str, Any], source: str = "push") -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Payload must be an object")
+        with self.lock:
+            if self.state.get("status") in {"disconnected", "error"}:
+                self.state["status"] = "connected"
+            if self.state.get("mode") in {"none", ""}:
+                self.state["mode"] = "push"
+        self._handle_payload(payload, source=source or "push")
+        return self.get_state()
+
     def _update_deck(self, deck: str, incoming: Dict[str, Any], source: str) -> None:
         track_path = str(incoming.get("path") or incoming.get("file_path") or "").strip()
         title = str(incoming.get("title") or incoming.get("name") or "").strip()
@@ -2682,6 +2725,10 @@ class SeratoBridgeManager:
         if not bridge:
             return self._empty_state()
         return bridge.get_state()
+
+    def ingest(self, user_id: int, payload: Dict[str, Any], source: str = "push") -> Dict[str, Any]:
+        bridge = self._get_or_create(user_id)
+        return bridge.ingest_payload(payload, source=source)
 
 
 def resolve_library_scan_path(raw_path: str) -> Path:
@@ -2907,6 +2954,26 @@ def ensure_default_library_for_user(user_id: int) -> Dict[str, Any]:
     return {"seeded": created > 0, "count": created}
 
 
+def enforce_user_library_seed_policy(user: Dict[str, Any]) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    role = str(user.get("role") or "dj").strip().lower()
+    if role == "admin":
+        if SEED_BOOTSTRAP_ADMIN_LIBRARY:
+            return ensure_default_library_for_user(user_id)
+        removed = db.unlink_virtual_default_tracks(user_id)
+        if removed:
+            db.add_event("library.seed_removed", {"count": removed, "policy": "admin_seed_disabled"}, user_id=user_id)
+        return {"seeded": False, "removed": removed, "count": len(db.list_tracks(limit=1, user_id=user_id))}
+
+    if SEED_NEW_USER_LIBRARY:
+        return ensure_default_library_for_user(user_id)
+
+    removed = db.unlink_virtual_default_tracks(user_id)
+    if removed:
+        db.add_event("library.seed_removed", {"count": removed, "policy": "new_user_seed_disabled"}, user_id=user_id)
+    return {"seeded": False, "removed": removed, "count": len(db.list_tracks(limit=1, user_id=user_id))}
+
+
 class ScanRequest(BaseModel):
     path: str = Field(..., description="Directory or file path")
     recursive: bool = True
@@ -2930,10 +2997,15 @@ class SessionStartRequest(BaseModel):
 
 
 class SeratoConnectRequest(BaseModel):
-    mode: str = Field(..., description="websocket | history | feed_file")
+    mode: str = Field(..., description="websocket | history | feed_file | push")
     ws_url: str = ""
     history_path: str = ""
     feed_path: str = ""
+
+
+class SeratoPushRequest(BaseModel):
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    source: str = "push"
 
 
 class ExternalSaveRequest(BaseModel):
@@ -3119,7 +3191,7 @@ def ensure_user_from_oauth(provider: str, subject: str, email: str, display_name
             user_id=int(user["id"]),
             email=email_norm or user.get("email", ""),
         )
-    ensure_default_library_for_user(int(user["id"]))
+    enforce_user_library_seed_policy(user)
     return user
 
 
@@ -3143,7 +3215,10 @@ def ensure_bootstrap_admin_account() -> None:
             dj_name=BOOTSTRAP_ADMIN_DJ_NAME,
             preferences=existing.get("preferences", {}),
         )
-        ensure_default_library_for_user(int(existing["id"]))
+        if SEED_BOOTSTRAP_ADMIN_LIBRARY:
+            ensure_default_library_for_user(int(existing["id"]))
+        else:
+            db.unlink_virtual_default_tracks(int(existing["id"]))
         db.add_event("auth.admin_bootstrap", {"email": login_id, "status": "updated"}, user_id=int(existing["id"]))
         return
 
@@ -3166,7 +3241,8 @@ def ensure_bootstrap_admin_account() -> None:
         )
     except sqlite3.IntegrityError:
         pass
-    ensure_default_library_for_user(int(created["id"]))
+    if SEED_BOOTSTRAP_ADMIN_LIBRARY:
+        ensure_default_library_for_user(int(created["id"]))
     db.add_event("auth.admin_bootstrap", {"email": login_id, "status": "created"}, user_id=int(created["id"]))
 
 
@@ -3434,7 +3510,7 @@ def auth_register(payload: AuthRegisterRequest, request: Request) -> Dict[str, A
         )
     except sqlite3.IntegrityError:
         pass
-    ensure_default_library_for_user(int(user["id"]))
+    enforce_user_library_seed_policy(user)
 
     token = build_session_token()
     hashed = token_hash(token)
@@ -3463,7 +3539,7 @@ def auth_login(payload: AuthLoginRequest, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="User inactive")
     if not AUTH_PASSWORDLESS and not verify_password(payload.password or "", user["password_hash"], user["password_salt"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    ensure_default_library_for_user(int(user["id"]))
+    enforce_user_library_seed_policy(user)
 
     token = build_session_token()
     hashed = token_hash(token)
@@ -4184,16 +4260,22 @@ def serato_capabilities() -> Dict[str, Any]:
                 "requires": ["feed_path", "JSON writer from your local adapter"],
                 "realTime": True,
             },
+            {
+                "mode": "push",
+                "ready": True,
+                "requires": ["POST /api/serato/push payloads from local DJ runtime"],
+                "realTime": True,
+            },
         ],
         "nativeSeratoPlugin": False,
-        "note": "Maya Mixa expects a local adapter/runtime feed for Serato deck telemetry.",
+        "note": "Maya Mixa expects a local adapter/runtime feed for Serato deck telemetry. For cloud use push mode.",
     }
 
 
 @app.post("/api/serato/connect")
 def serato_connect(payload: SeratoConnectRequest, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    if payload.mode not in {"websocket", "history", "feed_file"}:
-        raise HTTPException(status_code=400, detail="mode must be websocket, history, or feed_file")
+    if payload.mode not in {"websocket", "history", "feed_file", "push"}:
+        raise HTTPException(status_code=400, detail="mode must be websocket, history, feed_file, or push")
     user_id = int(user["id"])
     state = serato_bridges.connect(user_id, payload.mode, payload.ws_url, payload.history_path, payload.feed_path)
     db.add_event("serato.connect_user", {"mode": payload.mode}, user_id=int(user["id"]))
@@ -4211,6 +4293,15 @@ def serato_disconnect(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[
 @app.get("/api/serato/status")
 def serato_status(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     return serato_bridges.get_state(int(user["id"]))
+
+
+@app.post("/api/serato/push")
+def serato_push(payload: SeratoPushRequest, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    if not isinstance(payload.payload, dict) or not payload.payload:
+        raise HTTPException(status_code=400, detail="payload is required")
+    state = serato_bridges.ingest(user_id, payload.payload, source=(payload.source or "push")[:40])
+    return {"ok": True, "state": state}
 
 
 @app.get("/api/live/coach")

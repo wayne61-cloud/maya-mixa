@@ -171,16 +171,16 @@ Config keys:
 
 In passwordless mode, the login ID is still required (`admin`, `dj_xxx`, etc.), while password endpoints are disabled.
 
-## 8) Default DJ library
+## 8) New account policy (blank library)
 
-Every new user now gets a seeded default crate (8 tracks) with:
+By default, new DJ accounts are now created with an empty library.
 
-- BPM
-- key / Camelot
-- note / energy
-- Track DNA features
+Config keys:
 
-This prevents empty analysis screens for first-time users.
+- `MAYA_SEED_NEW_USER_LIBRARY=false` (default)
+- `MAYA_SEED_BOOTSTRAP_ADMIN_LIBRARY=true` (default)
+
+This keeps client accounts clean while preserving an optional seeded admin/demo account.
 
 ## 9) UI assets (launch/navbar/icon)
 
@@ -221,11 +221,28 @@ Without these credentials, frontend buttons remain visible but disabled and prov
 - `GET /api/ai/status` for local/remote AI health
 - `GET /api/search/unified?q=...` now aggregates iTunes + Deezer + MusicBrainz
 - `GET /api/serato/capabilities` exposes runtime bridge modes and requirements
+- `POST /api/serato/push` accepts local bridge payloads (cloud relay mode)
 - `POST /api/library/apple/sync` refreshes external catalog suggestions from iTunes for your DJ library seeds
 - `GET /api/account/dashboard` returns profile summary, favorites, session runtime, and AI tips
 - `GET /api/cloud/status` verifies DB persistence/runtime info
 
-Real native Serato deck telemetry still requires a local adapter/feed (websocket/history/feed file) running on the DJ machine.
+Real native Serato deck telemetry still requires a local adapter/feed running on the DJ machine.
+
+### Cloud relay quick start (for a remote client)
+
+1. DJ logs in to Maya Mixa (passwordless) and copies the auth token from DevTools/local storage (`maya_mixa_auth_token`).
+2. Run the local relay on the DJ machine:
+
+```bash
+npm run serato:history:push -- \
+  --api https://YOUR-API-DOMAIN \
+  --token YOUR_AUTH_TOKEN \
+  --history "~/Music/_Serato_/History/Sessions"
+```
+
+3. The script auto-connects bridge mode `push`; in the app you should then see Serato status become `connected`.
+
+This allows cloud backend + local Serato data without giving cloud direct filesystem access.
 
 ## 13) Optional AI enhancement
 
