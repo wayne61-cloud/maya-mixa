@@ -2560,6 +2560,10 @@ class SeratoBridge:
         with self.lock:
             self.state["status"] = "disconnected"
             self.state["mode"] = "none"
+            self.state["lastError"] = ""
+            self.state["lastSeen"] = None
+            self.state["deckA"] = None
+            self.state["deckB"] = None
         return self.get_state()
 
     def _run(self) -> None:

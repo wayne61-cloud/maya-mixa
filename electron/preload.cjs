@@ -1,4 +1,4 @@
-const { contextBridge } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -20,4 +20,12 @@ contextBridge.exposeInMainWorld('mayaConfig', {
   apiBase,
   isElectron: true,
   releaseChannel: process.env.MAYA_RELEASE_CHANNEL || 'stable',
+});
+
+contextBridge.exposeInMainWorld('mayaDesktop', {
+  serato: {
+    start: (payload = {}) => ipcRenderer.invoke('maya-serato-start', payload),
+    stop: () => ipcRenderer.invoke('maya-serato-stop'),
+    status: () => ipcRenderer.invoke('maya-serato-status'),
+  },
 });

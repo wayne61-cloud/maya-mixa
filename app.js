@@ -22,6 +22,8 @@
       apiBase: safeApiBase.replace(/\/+$/, ""),
     };
   })();
+  const desktopSeratoApi =
+    typeof window !== "undefined" && window.mayaDesktop && window.mayaDesktop.serato ? window.mayaDesktop.serato : null;
 
   const state = {
     activeScreen: "now-playing",
@@ -60,6 +62,15 @@
     seratoRelay: { socket: null, wsUrl: "", mode: "none", connected: false, forwarding: false },
     seratoAutoConnectAt: 0,
     seratoLibrarySyncAt: 0,
+    desktopSerato: {
+      available: Boolean(desktopSeratoApi),
+      active: false,
+      connected: false,
+      mode: "idle",
+      historyPath: "",
+      lastPushAt: null,
+      lastError: "",
+    },
     transitionFilters: { a: "", b: "" },
     sessionBuilder: { selectedTrackIds: [], analyses: [] },
 
@@ -72,6 +83,7 @@
 
     poller: null,
     recommendationsPoller: null,
+    desktopSeratoPoller: null,
     searchDebounce: null,
   };
 
@@ -634,6 +646,20 @@
     state.activeSession = null;
     state.accountDashboard = null;
     state.sessionBuilder = { selectedTrackIds: [], analyses: [] };
+    state.serato = { status: "disconnected", deckA: null, deckB: null, mode: "none", lastSeen: null, lastError: "" };
+    state.seratoRelay = { socket: null, wsUrl: "", mode: "none", connected: false, forwarding: false };
+    state.seratoAutoConnectAt = 0;
+    state.seratoLibrarySyncAt = 0;
+    state.desktopSerato = {
+      ...state.desktopSerato,
+      available: Boolean(desktopSeratoApi),
+      active: false,
+      connected: false,
+      mode: "idle",
+      historyPath: "",
+      lastPushAt: null,
+      lastError: "",
+    };
   }
 
   function resetSensitiveInputs() {
@@ -650,6 +676,7 @@
 
   function forceLogoutUi(message = "Session expirée. Reconnecte-toi.") {
     stopSeratoRelay();
+    if (state.desktopSerato.available) void stopDesktopSeratoSync();
     resetRuntimeData();
     persistAuthToken("");
     setCurrentUser(null);
@@ -1188,6 +1215,9 @@
 
   async function logoutSubmit() {
     try {
+      if (state.desktopSerato.available) {
+        await stopDesktopSeratoSync();
+      }
       if (state.auth.token) {
         await api("POST", "/api/auth/logout", {});
       }
@@ -1306,18 +1336,114 @@
     }
   }
 
+  async function syncDesktopSeratoStatus() {
+    if (!desktopSeratoApi) return null;
+    try {
+      const payload = await desktopSeratoApi.status();
+      if (payload && typeof payload === "object") {
+        state.desktopSerato = { ...state.desktopSerato, ...payload, available: true };
+      }
+      return state.desktopSerato;
+    } catch (error) {
+      state.desktopSerato = {
+        ...state.desktopSerato,
+        available: true,
+        active: false,
+        connected: false,
+        lastError: humanizeError(error),
+      };
+      return state.desktopSerato;
+    }
+  }
+
+  async function startDesktopSeratoSync(force = false) {
+    if (!desktopSeratoApi) return false;
+    const apiBase = String(runtimeConfig.apiBase || "").trim();
+    const token = String(state.auth.token || "").trim();
+    if (!apiBase || !token) return false;
+    try {
+      const payload = await desktopSeratoApi.start({
+        apiBase,
+        token,
+        force: Boolean(force),
+      });
+      if (payload && typeof payload === "object") {
+        state.desktopSerato = { ...state.desktopSerato, ...payload, available: true };
+      }
+      await syncDesktopSeratoStatus();
+      updateTopStatus();
+      return true;
+    } catch (error) {
+      state.desktopSerato = {
+        ...state.desktopSerato,
+        available: true,
+        active: false,
+        connected: false,
+        lastError: humanizeError(error),
+      };
+      updateTopStatus();
+      return false;
+    }
+  }
+
+  async function stopDesktopSeratoSync() {
+    if (!desktopSeratoApi) return;
+    try {
+      const payload = await desktopSeratoApi.stop();
+      if (payload && typeof payload === "object") {
+        state.desktopSerato = { ...state.desktopSerato, ...payload, available: true };
+      }
+    } catch (_) {
+      // Best effort.
+    } finally {
+      state.desktopSerato = {
+        ...state.desktopSerato,
+        available: true,
+        active: false,
+        connected: false,
+      };
+      updateTopStatus();
+    }
+  }
+
+  function stopDesktopSeratoPolling() {
+    clearInterval(state.desktopSeratoPoller);
+    state.desktopSeratoPoller = null;
+  }
+
+  function startDesktopSeratoPolling() {
+    if (!desktopSeratoApi) return;
+    stopDesktopSeratoPolling();
+    state.desktopSeratoPoller = setInterval(async () => {
+      await syncDesktopSeratoStatus();
+      updateTopStatus();
+    }, 2600);
+  }
+
   function stopPollers() {
     clearInterval(state.poller);
     clearInterval(state.recommendationsPoller);
+    stopDesktopSeratoPolling();
     state.poller = null;
     state.recommendationsPoller = null;
   }
 
   function startPollers() {
     stopPollers();
+    if (state.desktopSerato.available) {
+      startDesktopSeratoPolling();
+    }
     state.poller = setInterval(async () => {
       await refreshSerato();
-      await autoConfigureSeratoBridge(false);
+      if (state.desktopSerato.available) {
+        if (!state.desktopSerato.active) {
+          await startDesktopSeratoSync(false);
+        } else {
+          await syncDesktopSeratoStatus();
+        }
+      } else {
+        await autoConfigureSeratoBridge(false);
+      }
       await refreshLiveCoach();
       await refreshHistory();
       if (state.activeScreen === "account") {
@@ -2139,15 +2265,33 @@
   }
 
   function renderNowPlaying() {
-    const deckA = state.serato.deckA;
-    const deckB = state.serato.deckB;
-
-    const current = currentDeckTrack(deckA) || state.tracks[0] || null;
-    const next = currentDeckTrack(deckB) || state.recommendations[0]?.track || state.tracks[1] || null;
+    const bridgeConnected = state.serato?.status === "connected";
+    const deckA = bridgeConnected ? state.serato.deckA : null;
+    const deckB = bridgeConnected ? state.serato.deckB : null;
+    const current = bridgeConnected ? currentDeckTrack(deckA) : null;
+    const next = bridgeConnected ? currentDeckTrack(deckB) : null;
 
     if (!current) {
       el.nowTrackName.textContent = "Aucun morceau";
-      el.nowTrackArtist.textContent = "Connecte Serato pour récupérer le titre en direct";
+      el.nowTrackArtist.textContent = state.desktopSerato.available
+        ? "Ouvre Serato DJ Pro puis charge Deck A pour activer le live."
+        : "Connecte Serato pour récupérer le titre en direct";
+      el.nowBpm.textContent = "-- BPM";
+      el.nowKey.textContent = "--";
+      el.nowNote.textContent = "Note --/10";
+      el.nowEnergy.textContent = "Énergie --";
+      el.nowGenre.textContent = "--";
+      el.nextTrackName.textContent = "En attente Deck B";
+      el.nextTrackArtist.textContent = "--";
+      el.nextBpm.textContent = "-- BPM";
+      el.nextKey.textContent = "--";
+      el.nextNote.textContent = "Note --/10";
+      el.nextCompatibility.textContent = "--%";
+      el.nextCompatibilityBar.style.width = "0%";
+      el.deckProgressBar.style.width = "0%";
+      el.deckPosition.textContent = "--:--";
+      el.deckRemaining.textContent = "Restant --:--";
+      el.nowCoach.innerHTML = `<div class="coach-tip">1 Connect Serato • 2 Load Deck A • 3 Load Deck B • 4 Start live coach.</div>`;
       el.nowRecommendations.innerHTML = `<div class="track-card">Aucune recommandation pour le moment.</div>`;
       setWaveMenuState(el.deckAWave, 0, false);
       setWaveMenuState(el.deckBWave, 0, false);
@@ -2177,13 +2321,19 @@
       el.nextBpm.textContent = `${Number(next.bpm || 0).toFixed(2)} BPM`;
       el.nextKey.textContent = next.camelot_key || next.musical_key || "-";
       el.nextNote.textContent = `Note ${Number(next.note || 0).toFixed(1)}/10`;
+    } else {
+      el.nextTrackName.textContent = "En attente Deck B";
+      el.nextTrackArtist.textContent = "--";
+      el.nextBpm.textContent = "-- BPM";
+      el.nextKey.textContent = "--";
+      el.nextNote.textContent = "Note --/10";
     }
 
     renderTrackWaveform(current, el.nowWaveformA, el.nowStructureA, el.nowWaveformALabel);
     renderTrackWaveform(next, el.nowWaveformB, el.nowStructureB, el.nowWaveformBLabel);
 
     setWaveMenuState(el.deckAWave, Number(deckA?.bpm || current.bpm || 0), true);
-    setWaveMenuState(el.deckBWave, Number(deckB?.bpm || next?.bpm || 0), Boolean(next));
+    setWaveMenuState(el.deckBWave, Number(deckB?.bpm || next?.bpm || 0), Boolean(deckB && next));
 
     const recs = state.recommendations.slice(0, 6);
     if (!recs.length) {
@@ -2247,8 +2397,9 @@
   }
 
   function renderLiveOverlay() {
-    const deckA = state.serato.deckA;
-    const current = currentDeckTrack(deckA) || state.tracks[0] || null;
+    const bridgeConnected = state.serato?.status === "connected";
+    const deckA = bridgeConnected ? state.serato.deckA : null;
+    const current = bridgeConnected ? currentDeckTrack(deckA) : null;
     if (!current) {
       el.liveTrackName.textContent = "Charge un track sur Deck A";
       el.liveBpm.textContent = "-- BPM";
@@ -2426,7 +2577,14 @@
     const relayInfo = state.seratoRelay?.wsUrl
       ? ` • relais ${state.seratoRelay.connected ? "actif" : "off"} (${state.seratoRelay.wsUrl})`
       : "";
-    const wsLine = `Mode bridge: ${state.serato.mode}. Statut: ${state.serato.status}${state.serato.lastError ? ` (${state.serato.lastError})` : ""}${relayInfo}`;
+    const desktopInfo = state.desktopSerato.available
+      ? ` • desktop ${state.desktopSerato.active ? "actif" : "off"}${
+          state.desktopSerato.historyPath ? ` (${state.desktopSerato.historyPath})` : ""
+        }${state.desktopSerato.lastError ? ` [${state.desktopSerato.lastError}]` : ""}`
+      : "";
+    const wsLine = `Mode bridge: ${state.serato.mode}. Statut: ${state.serato.status}${
+      state.serato.lastError ? ` (${state.serato.lastError})` : ""
+    }${relayInfo}${desktopInfo}`;
     el.wsStatusDetail.textContent = wsLine;
   }
 
@@ -2453,6 +2611,9 @@
 
   async function refreshSerato() {
     try {
+      if (state.desktopSerato.available) {
+        await syncDesktopSeratoStatus();
+      }
       state.serato = await api("GET", "/api/serato/status");
       const liveTrackIds = [state.serato?.deckA?.track_id, state.serato?.deckB?.track_id].filter(Boolean).map((value) => Number(value));
       const missing = liveTrackIds.some((id) => !getTrackById(id));
@@ -2469,8 +2630,15 @@
         const deckAReady = Boolean(state.serato?.deckA?.track_id || state.serato?.deckA?.title);
         const deckBReady = Boolean(state.serato?.deckB?.track_id || state.serato?.deckB?.title);
         if (!bridgeReady) {
-          el.wsStatusDetail.textContent =
-            "1 Connect Serato • 2 Load Deck A • 3 Load Deck B • 4 Start live coach (mode LIVE).";
+          if (state.desktopSerato.available) {
+            const desktopLine = state.desktopSerato.active
+              ? "Auto-sync desktop actif. Ouvre Serato DJ Pro puis charge Deck A / Deck B."
+              : "Auto-sync desktop inactif. Relance Maya Mixa et ouvre Serato DJ Pro.";
+            el.wsStatusDetail.textContent = `${desktopLine} 1 Connect Serato • 2 Load Deck A • 3 Load Deck B • 4 Start live coach.`;
+          } else {
+            el.wsStatusDetail.textContent =
+              "1 Connect Serato • 2 Load Deck A • 3 Load Deck B • 4 Start live coach (mode LIVE).";
+          }
         } else if (!deckAReady || !deckBReady) {
           el.wsStatusDetail.textContent =
             `Serato connecté. ${deckAReady ? "Deck A OK" : "Load Deck A"} • ${deckBReady ? "Deck B OK" : "Load Deck B"} • active ensuite le mode LIVE.`;
@@ -2665,6 +2833,7 @@
   }
 
   async function autoConfigureSeratoBridge(force = false) {
+    if (state.desktopSerato.available) return;
     const now = Date.now();
     const retryMs = state.serato?.status === "connected" ? 22000 : state.liveMode ? 3500 : 7000;
     if (!force && now - Number(state.seratoAutoConnectAt || 0) < retryMs) return;
@@ -2704,6 +2873,24 @@
   }
 
   async function connectBridge() {
+    if (state.desktopSerato.available) {
+      try {
+        const started = await startDesktopSeratoSync(true);
+        if (!started) throw new Error("Auto-sync desktop indisponible");
+        state.serato = await api("POST", "/api/serato/connect", { mode: "push", ws_url: "", history_path: "", feed_path: "" });
+        updateTopStatus();
+        showToast("Auto-sync Serato desktop activé");
+        await refreshSerato();
+        await refreshLiveCoach();
+        await refreshRecommendations();
+        await refreshHistory();
+        await refreshAccountDashboard();
+      } catch (error) {
+        showToast(`Connexion Serato desktop impossible: ${String(error.message || error)}`);
+      }
+      return;
+    }
+
     const selectedMode = el.seratoModeSelect?.value || "websocket";
     const useRelay = selectedMode === "relay_websocket";
     const relayUrl = String(el.wsUrlInput?.value || "").trim() || "ws://127.0.0.1:8787";
@@ -2738,6 +2925,9 @@
   async function disconnectBridge() {
     try {
       stopSeratoRelay();
+      if (state.desktopSerato.available) {
+        await stopDesktopSeratoSync();
+      }
       state.serato = await api("POST", "/api/serato/disconnect", {});
       state.liveCoach = null;
       updateTopStatus();
@@ -3046,8 +3236,19 @@
     renderMatchesPane();
     renderSessionBuilder();
     scheduleSessionBuilderAnalysis();
+    if (state.desktopSerato.available) {
+      await startDesktopSeratoSync(true);
+      startDesktopSeratoPolling();
+      try {
+        await api("POST", "/api/serato/connect", { mode: "push", ws_url: "", history_path: "", feed_path: "" });
+      } catch (_) {
+        // Keep app usable even if push bridge setup fails momentarily.
+      }
+    }
     await refreshSerato();
-    await autoConfigureSeratoBridge(true);
+    if (!state.desktopSerato.available) {
+      await autoConfigureSeratoBridge(true);
+    }
     await refreshSerato();
     await refreshRecommendations();
     await refreshLiveCoach();
