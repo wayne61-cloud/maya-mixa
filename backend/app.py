@@ -2450,6 +2450,53 @@ def external_track_to_runtime(external: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def external_track_to_local_payload(external: Dict[str, Any]) -> Dict[str, Any]:
+    intelligence = external.get("intelligence") or {}
+    features = dict(intelligence.get("features") or {})
+    confidence = float(features.get("analysis_confidence") or external.get("confidence") or intelligence.get("confidence") or 0.55)
+    features["analysis_confidence"] = round(clamp(confidence, 0.0, 1.0), 3)
+    features.setdefault("source", "external-import")
+
+    source = str(external.get("source") or "web").strip().lower() or "web"
+    source_track_id = str(external.get("source_track_id") or external.get("id") or "unknown").strip()
+    title = str(external.get("title") or "Unknown Track").strip() or "Unknown Track"
+    artist = str(external.get("artist") or "Unknown Artist").strip() or "Unknown Artist"
+    canonical = re.sub(r"[^a-z0-9]+", "-", f"{source}-{source_track_id}-{artist}-{title}".lower()).strip("-") or "external-track"
+    file_path = f"virtual://external-import/{canonical}.mp3"
+    file_hash = hashlib.sha1(f"{source}:{source_track_id}:{artist}:{title}".encode("utf-8")).hexdigest()
+
+    raw_tags = external.get("tags") or []
+    if isinstance(raw_tags, str):
+        tags = [part.strip() for part in raw_tags.split("|") if part.strip()]
+    else:
+        tags = [str(part).strip() for part in raw_tags if str(part).strip()]
+    tags = sorted(set(tags + ["external-import", source]))
+
+    key_value = str(external.get("camelot_key") or "").strip()
+    musical_key = str(external.get("musical_key") or "").strip()
+    if not musical_key and key_value:
+        musical_key = "A minor" if key_value.upper().endswith("A") else "C major"
+    if not key_value and musical_key:
+        key_value = "8A"
+
+    return {
+        "file_path": file_path,
+        "file_hash": file_hash,
+        "title": title,
+        "artist": artist,
+        "album": str(external.get("version") or "").strip(),
+        "duration": max(60.0, float(external.get("duration") or 360.0)),
+        "bpm": float(external.get("bpm") or 124.0),
+        "musical_key": musical_key,
+        "camelot_key": key_value,
+        "energy": clamp(float(external.get("energy") or 6.0), 1.0, 10.0),
+        "note": clamp(float(external.get("note") or 6.0), 1.0, 10.0),
+        "genre": str(external.get("genre") or "electronic").strip() or "electronic",
+        "tags": tags,
+        "features": features,
+    }
+
+
 class SeratoBridge:
     def __init__(self, db: Database, analyzer: AudioAnalyzer, user_id: Optional[int] = None) -> None:
         self.db = db
@@ -4244,6 +4291,23 @@ def external_track_save(
         user_id=user_id,
     )
     return {"saved": saved, "track": row}
+
+
+@app.post("/api/external/{external_id}/import-local")
+def external_track_import_local(external_id: int, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    row = db.get_external_track(external_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="External track not found")
+    payload = external_track_to_local_payload(row)
+    track = db.upsert_track(payload)
+    db.link_user_track(user_id, int(track["id"]))
+    db.add_event(
+        "external.import_local",
+        {"external_track_id": external_id, "track_id": int(track["id"]), "title": track.get("title"), "artist": track.get("artist")},
+        user_id=user_id,
+    )
+    return {"ok": True, "track": track}
 
 
 @app.patch("/api/external/list-items/{item_id}")

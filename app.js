@@ -45,6 +45,8 @@
     tracksById: new Map(),
     localSearchResults: [],
     globalSearchResults: [],
+    globalSearchById: new Map(),
+    searchEnrichmentNonce: 0,
     selectedExternalDetail: null,
     selectedExternalMatches: [],
     analysisExternalTrack: null,
@@ -131,6 +133,7 @@
     externalTestLibraryBtn: document.getElementById("externalTestLibraryBtn"),
     externalFindSimilarBtn: document.getElementById("externalFindSimilarBtn"),
     externalOpenAnalysisBtn: document.getElementById("externalOpenAnalysisBtn"),
+    externalImportLibraryBtn: document.getElementById("externalImportLibraryBtn"),
 
     libraryPathInput: document.getElementById("libraryPathInput"),
     scanLibraryBtn: document.getElementById("scanLibraryBtn"),
@@ -589,6 +592,8 @@
     state.tracksById = new Map();
     state.localSearchResults = [];
     state.globalSearchResults = [];
+    state.globalSearchById = new Map();
+    state.searchEnrichmentNonce = 0;
     state.selectedExternalDetail = null;
     state.selectedExternalMatches = [];
     state.analysisExternalTrack = null;
@@ -1303,6 +1308,7 @@
     if (!query) {
       state.localSearchResults = state.tracks.slice(0, 120);
       state.globalSearchResults = [];
+      state.globalSearchById = new Map();
       renderLibraryLocal();
       renderLibraryGlobal();
       if (state.searchTab !== "local") setSearchTab("local");
@@ -1313,12 +1319,56 @@
       const payload = await api("GET", `/api/search/unified?q=${encodeURIComponent(query)}&limit=40`);
       state.localSearchResults = payload.local || [];
       state.globalSearchResults = payload.global || [];
+      state.globalSearchById = new Map((state.globalSearchResults || []).map((track) => [Number(track.id), track]));
       renderLibraryLocal();
       renderLibraryGlobal();
       renderMatchesPane();
+      enrichGlobalResultsLive();
     } catch (error) {
       console.error(error);
-      showToast("Recherche impossible");
+      showToast(`Recherche impossible: ${humanizeError(error)}`);
+    }
+  }
+
+  function upsertGlobalSearchTrack(track) {
+    const id = Number(track?.id || 0);
+    if (!id) return;
+    const nextRows = (state.globalSearchResults || []).map((row) => (Number(row?.id || 0) === id ? { ...row, ...track } : row));
+    state.globalSearchResults = nextRows;
+    state.globalSearchById.set(id, { ...(state.globalSearchById.get(id) || {}), ...track });
+  }
+
+  function getGlobalSearchTrack(externalId) {
+    const id = Number(externalId || 0);
+    if (!id) return null;
+    return state.globalSearchById.get(id) || state.globalSearchResults.find((row) => Number(row?.id || 0) === id) || null;
+  }
+
+  async function enrichGlobalResultsLive() {
+    const nonce = Number(state.searchEnrichmentNonce || 0) + 1;
+    state.searchEnrichmentNonce = nonce;
+    const targets = (state.globalSearchResults || []).slice(0, 8).map((row) => Number(row?.id || 0)).filter(Boolean);
+    for (const externalId of targets) {
+      if (state.searchEnrichmentNonce !== nonce) return;
+      try {
+        const detail = await api("GET", `/api/external/${externalId}?deep=true&matches_limit=6`);
+        if (state.searchEnrichmentNonce !== nonce) return;
+        const external = detail?.external || null;
+        if (!external) continue;
+        upsertGlobalSearchTrack(external);
+        if (Number(state.selectedExternalDetail?.external?.id || 0) === Number(external.id)) {
+          state.selectedExternalDetail = detail;
+          state.selectedExternalMatches = detail.libraryMatches || [];
+          if (state.analysisExternalTrack && Number(state.analysisExternalTrack.id || 0) === Number(external.id)) {
+            state.analysisExternalTrack = external;
+            renderAnalysis();
+          }
+          renderMatchesPane();
+        }
+        renderLibraryGlobal();
+      } catch (_) {
+        // best effort: keep quick search data if deep enrichment fails
+      }
     }
   }
 
@@ -1373,10 +1423,16 @@
           <span class="chip">${track.bpm ? `${Number(track.bpm).toFixed(2)} BPM` : "BPM est."}</span>
           <span class="chip">${esc(track.camelot_key || track.musical_key || "Key est.")}</span>
           <span class="chip">${track.note ? `${Number(track.note).toFixed(1)}/10` : "Note est."}</span>
+          <span class="chip">IA ${(Number(track?.intelligence?.features?.analysis_confidence || track?.confidence || 0) * 100).toFixed(0)}%</span>
         </div>
         <div style="font-size:0.77rem; color:var(--text-secondary); margin-top:8px;">source: ${esc(track.source)}</div>
         <div class="compat-badge ${compatClass(Number(track.current_track_compatibility || 0))}">
           ${track.current_track_compatibility ? `${Number(track.current_track_compatibility).toFixed(1)}% avec track en cours` : "Pas encore de match track en cours"}
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <button class="btn glow-btn" type="button" data-external-open="${track.id}">Fiche IA</button>
+          <button class="btn ghost" type="button" data-external-analyze="${track.id}">Ouvrir Analyse</button>
+          <button class="btn ghost" type="button" data-external-import="${track.id}">Ajouter à ma bibliothèque</button>
         </div>
         <div class="track-reveal">Clique pour ouvrir la fiche externe + compatibilité avec ta bibliothèque.</div>
       </article>
@@ -1410,7 +1466,7 @@
       .join("");
   }
 
-  async function openExternalDetail(externalId, deep = true) {
+  async function openExternalDetail(externalId, deep = true, allowFallback = true) {
     try {
       el.externalDetailCard.classList.remove("hidden");
       el.externalDetailBody.innerHTML = typingIndicatorMarkup("Maya analyse le morceau externe...");
@@ -1420,6 +1476,7 @@
       state.selectedExternalMatches = detail.libraryMatches || [];
 
       const external = detail.external;
+      upsertGlobalSearchTrack(external);
       const compatibility = detail.currentCompatibility;
       const mood = (external.mood_tags || []).join(" • ");
       const tags = (external.tags || []).join(" • ");
@@ -1452,17 +1509,25 @@
 
       el.externalDetailCard.classList.remove("hidden");
       renderMatchesPane();
+      return detail;
     } catch (error) {
+      if (deep && allowFallback) {
+        return openExternalDetail(externalId, false, false);
+      }
       console.error(error);
-      showToast("Impossible d'ouvrir la fiche externe");
+      showToast(`Impossible d'ouvrir la fiche externe: ${humanizeError(error)}`);
+      return null;
     }
   }
 
   function openSelectedExternalInAnalysis() {
-    const external = state.selectedExternalDetail?.external || null;
+    const external = state.selectedExternalDetail?.external || state.globalSearchResults[0] || null;
     if (!external) {
       showToast("Aucun morceau externe sélectionné");
       return;
+    }
+    if (!state.selectedExternalDetail?.external) {
+      state.selectedExternalDetail = { external, currentCompatibility: null, libraryMatches: [] };
     }
     state.analysisExternalTrack = external;
     if (el.analysisSourceTag) {
@@ -1470,6 +1535,27 @@
     }
     navigateTo("analysis");
     renderAnalysis();
+  }
+
+  async function openExternalFromSearch(externalId, openInAnalysis = false) {
+    const id = Number(externalId || 0);
+    if (!id) return;
+    const quick = getGlobalSearchTrack(id);
+    if (quick) {
+      state.selectedExternalDetail = { external: quick, currentCompatibility: null, libraryMatches: [] };
+      if (openInAnalysis) {
+        state.analysisExternalTrack = quick;
+        navigateTo("analysis");
+        renderAnalysis();
+      }
+    }
+    const detail = await openExternalDetail(id, true, true);
+    if (!detail?.external) return;
+    if (openInAnalysis) {
+      state.analysisExternalTrack = detail.external;
+      navigateTo("analysis");
+      renderAnalysis();
+    }
   }
 
   async function saveExternalTo(listName, action = "save") {
@@ -1486,6 +1572,24 @@
     } catch (error) {
       console.error(error);
       showToast(action === "save" ? "Ajout impossible" : "Suppression impossible");
+    }
+  }
+
+  async function importExternalToLibrary(externalId) {
+    const id = Number(externalId || state.selectedExternalDetail?.external?.id || 0);
+    if (!id) {
+      showToast("Aucun morceau externe sélectionné");
+      return;
+    }
+    try {
+      await api("POST", `/api/external/${id}/import-local`, {});
+      await loadTracks();
+      await refreshRecommendations();
+      renderLibraryLocal();
+      renderSessionBuilder();
+      showToast("Morceau ajouté à ta bibliothèque locale");
+    } catch (error) {
+      showToast(`Import impossible: ${humanizeError(error)}`);
     }
   }
 
@@ -1517,9 +1621,11 @@
     try {
       const payload = await api("GET", `/api/external/${detail.external.id}/similar?limit=12`);
       state.globalSearchResults = payload.similar || [];
+      state.globalSearchById = new Map((state.globalSearchResults || []).map((track) => [Number(track.id), track]));
       renderLibraryGlobal();
       setSearchTab("global");
       showToast("Morceaux similaires chargés");
+      enrichGlobalResultsLive();
     } catch (error) {
       console.error(error);
       showToast("Recherche similaire impossible");
@@ -2118,8 +2224,13 @@
     const bridgeStatus = bridgeMap[state.serato.status] || ["disconnected", state.serato.status];
     setStatusPill(el.bridgeStatus, el.bridgeStatusText, bridgeStatus[0], "Serato", bridgeStatus[1]);
 
-    const aiText = `local ${state.ai.localModelActive ? "actif" : "off"} • openai ${state.ai.openaiEnabled ? (state.ai.openaiConnected ? "connecté" : "configuré") : "off"} • web metadata on`;
-    const aiStatus = state.ai.openaiEnabled ? (state.ai.openaiConnected ? "connected" : "disconnected") : "connected";
+    const openaiText = state.ai.openaiEnabled
+      ? state.ai.openaiConnected
+        ? "OpenAI connecté"
+        : "OpenAI configuré (test en attente)"
+      : `OpenAI optionnel non configuré (${state.ai.openaiMessage || "clé absente"})`;
+    const aiText = `local ${state.ai.localModelActive ? "actif" : "off"} • ${openaiText} • internet metadata actif`;
+    const aiStatus = state.ai.localModelActive ? "connected" : "disconnected";
     setStatusPill(el.socketStatus, el.socketStatusText, aiStatus, "AI", aiText);
 
     const relayInfo = state.seratoRelay?.wsUrl
@@ -2519,12 +2630,29 @@
     });
 
     on(el.globalResults, "click", async (event) => {
+      const importBtn = event.target.closest("[data-external-import]");
+      if (importBtn) {
+        const id = importBtn.getAttribute("data-external-import");
+        if (id) await importExternalToLibrary(id);
+        return;
+      }
+      const analyzeBtn = event.target.closest("[data-external-analyze]");
+      if (analyzeBtn) {
+        const id = analyzeBtn.getAttribute("data-external-analyze");
+        if (id) await openExternalFromSearch(Number(id), true);
+        return;
+      }
+      const openBtn = event.target.closest("[data-external-open]");
+      if (openBtn) {
+        const id = openBtn.getAttribute("data-external-open");
+        if (id) await openExternalFromSearch(Number(id), false);
+        return;
+      }
       const card = event.target.closest("[data-external-track-id]");
       if (!card) return;
       const id = card.getAttribute("data-external-track-id");
       if (!id) return;
-      await openExternalDetail(Number(id), true);
-      openSelectedExternalInAnalysis();
+      await openExternalFromSearch(Number(id), false);
     });
   }
 
@@ -2627,7 +2755,15 @@
     on(el.externalRemoveCrateBtn, "click", () => saveExternalTo("prep_crate", "remove"));
     on(el.externalTestLibraryBtn, "click", testExternalWithLibrary);
     on(el.externalFindSimilarBtn, "click", findSimilarExternal);
-    on(el.externalOpenAnalysisBtn, "click", openSelectedExternalInAnalysis);
+    on(el.externalOpenAnalysisBtn, "click", async () => {
+      const selectedId = Number(state.selectedExternalDetail?.external?.id || 0);
+      if (selectedId) {
+        await openExternalFromSearch(selectedId, true);
+      } else {
+        openSelectedExternalInAnalysis();
+      }
+    });
+    on(el.externalImportLibraryBtn, "click", () => importExternalToLibrary());
 
     on(el.sessionBuilderClearBtn, "click", clearSessionBuilder);
     on(el.sessionBuilderAvailable, "click", (event) => {
