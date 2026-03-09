@@ -10,6 +10,7 @@
     "backend:prod": "uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-4173}",
     "cloud:configure-runtime": "node scripts/configure-runtime.mjs",
     "cloud:smoke": "node scripts/smoke-cloud.mjs",
+    "ui:bindings": "node scripts/verify-ui-bindings.mjs",
     "serato:history:push": "node scripts/serato-history-push.mjs",
     "electron:dev:local": "cross-env MAYA_API_BASE=http://127.0.0.1:4173 electron .",
     "electron:dev:cloud": "electron .",

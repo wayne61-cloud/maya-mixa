@@ -2,6 +2,7 @@
   const AUTH_TOKEN_KEY = "maya_mixa_auth_token";
   const API_BASE_KEY = "maya_mixa_api_base";
   const APPLE_SYNC_KEY = "maya_mixa_apple_sync_at";
+  const DEFAULT_CLOUD_API_BASE = "https://maya-mixa-cloud.onrender.com";
   const BOOT_LOADER_MIN_MS = 950;
   const BOOT_LOADER_MAX_MS = 7000;
   const bootStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -14,7 +15,10 @@
     } catch (_) {
       storedApiBase = "";
     }
-    const rawApiBase = String(electronConfig.apiBase || inlineConfig.apiBase || storedApiBase || "").trim();
+    const useDefaultCloudFallback = typeof window !== "undefined" && window.location?.protocol === "file:";
+    const rawApiBase = String(
+      electronConfig.apiBase || inlineConfig.apiBase || storedApiBase || (useDefaultCloudFallback ? DEFAULT_CLOUD_API_BASE : "")
+    ).trim();
     const safeApiBase = /your-maya-mixa-api\.example\.com/i.test(rawApiBase) ? "" : rawApiBase;
     return {
       ...inlineConfig,
@@ -356,7 +360,7 @@
 
   function updateApiConfigUi() {
     if (!el.apiConfigCard || !el.apiBaseInput || !el.apiBaseStatus) return;
-    const shouldShow = requiresConfiguredApiBase() || !hasApiBaseConfigured();
+    const shouldShow = !hasApiBaseConfigured();
     el.apiConfigCard.classList.toggle("hidden", !shouldShow);
     el.apiBaseInput.value = runtimeConfig.apiBase || "";
     if (hasApiBaseConfigured()) {
@@ -373,7 +377,7 @@
   function ensureApiConfiguredForAuth() {
     if (!requiresConfiguredApiBase()) return true;
     if (hasApiBaseConfigured()) return true;
-    setAuthFeedback("Backend API non configurée. Renseigne l'URL de ton backend dans la section API.", "error");
+    setAuthFeedback("Backend API indisponible. Vérifie internet puis réessaie.", "error");
     updateApiConfigUi();
     return false;
   }
@@ -488,20 +492,22 @@
     const apiMissing = requiresConfiguredApiBase() && !hasApiBaseConfigured();
 
     if (el.googleAuthBtn) {
-      el.googleAuthBtn.disabled = apiMissing || !google.configured;
+      el.googleAuthBtn.disabled = false;
       el.googleAuthBtn.title = apiMissing
         ? "Configure l'URL API backend d'abord"
         : google.configured
         ? "Connexion Google activée"
         : "Google OAuth non configuré côté backend";
+      el.googleAuthBtn.classList.toggle("ghost", apiMissing || !google.configured);
     }
     if (el.appleAuthBtn) {
-      el.appleAuthBtn.disabled = apiMissing || !apple.configured;
+      el.appleAuthBtn.disabled = false;
       el.appleAuthBtn.title = apiMissing
         ? "Configure l'URL API backend d'abord"
         : apple.configured
         ? "Connexion Apple activée"
         : "Apple OAuth non configuré côté backend";
+      el.appleAuthBtn.classList.toggle("ghost", apiMissing || !apple.configured);
     }
     if (el.oauthStatusText) {
       if (apiMissing) {
@@ -562,7 +568,9 @@
     if (!ensureApiConfiguredForAuth()) return;
     const cfg = state.auth.oauth?.[provider];
     if (!cfg?.configured) {
-      setAuthFeedback(`${provider} OAuth non configuré sur ce runtime.`, "error");
+      const message = `${provider} OAuth non configuré sur ce runtime.`;
+      setAuthFeedback(message, "error");
+      showToast(message);
       return;
     }
     window.location.href = oauthStartUrl(provider);
@@ -2569,8 +2577,9 @@
       ? state.ai.openaiConnected
         ? "OpenAI connecté"
         : "OpenAI configuré (test en attente)"
-      : `OpenAI optionnel non configuré (${state.ai.openaiMessage || "clé absente"})`;
-    const aiText = `local ${state.ai.localModelActive ? "actif" : "off"} • ${openaiText} • internet metadata actif`;
+      : "OpenAI optionnel (non requis)";
+    const internetText = state.ai?.internetEnrichment?.active ? "internet metadata actif" : "internet metadata off";
+    const aiText = `IA cloud connectée • moteur local ${state.ai.localModelActive ? "actif" : "off"} • ${openaiText} • ${internetText}`;
     const aiStatus = state.ai.localModelActive ? "connected" : "disconnected";
     setStatusPill(el.socketStatus, el.socketStatusText, aiStatus, "AI", aiText);
 
@@ -2683,7 +2692,14 @@
       state.ai = await api("GET", "/api/ai/status");
       updateTopStatus();
     } catch (error) {
-      console.error(error);
+      state.ai = {
+        ...state.ai,
+        localModelActive: true,
+        openaiEnabled: false,
+        openaiConnected: false,
+        openaiMessage: humanizeError(error),
+      };
+      updateTopStatus();
     }
   }
 
