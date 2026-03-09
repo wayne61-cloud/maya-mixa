@@ -1035,6 +1035,15 @@ class Database:
             )
             self.conn.commit()
 
+    def unlink_user_track(self, user_id: int, track_id: int) -> int:
+        with self.lock:
+            cur = self.conn.execute(
+                "DELETE FROM user_tracks WHERE user_id = ? AND track_id = ?",
+                (user_id, track_id),
+            )
+            self.conn.commit()
+            return int(cur.rowcount or 0)
+
     def unlink_virtual_default_tracks(self, user_id: int) -> int:
         with self.lock:
             cur = self.conn.execute(
@@ -1356,6 +1365,41 @@ class Database:
             params.append(limit)
             rows = self.conn.execute(sql, tuple(params)).fetchall()
             return [dict(row) for row in rows]
+
+    def remove_external_list_item(self, item_id: int, user_id: Optional[int] = None) -> bool:
+        with self.lock:
+            if user_id is None:
+                cur = self.conn.execute("DELETE FROM external_lists WHERE id = ?", (item_id,))
+            else:
+                cur = self.conn.execute("DELETE FROM external_lists WHERE id = ? AND user_id = ?", (item_id, user_id))
+            self.conn.commit()
+            return int(cur.rowcount or 0) > 0
+
+    def update_external_list_item(
+        self,
+        item_id: int,
+        list_name: Optional[str] = None,
+        note: Optional[str] = None,
+        user_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            where = "id = ?"
+            params: List[Any] = [item_id]
+            if user_id is not None:
+                where += " AND user_id = ?"
+                params.append(user_id)
+            row = self.conn.execute(f"SELECT * FROM external_lists WHERE {where}", tuple(params)).fetchone()
+            if not row:
+                return None
+            next_list_name = (list_name or row["list_name"]).strip() or row["list_name"]
+            next_note = note if note is not None else row["note"]
+            self.conn.execute(
+                "UPDATE external_lists SET list_name = ?, note = ? WHERE id = ?",
+                (next_list_name, next_note, item_id),
+            )
+            self.conn.commit()
+            updated = self.conn.execute("SELECT * FROM external_lists WHERE id = ?", (item_id,)).fetchone()
+            return dict(updated) if updated else None
 
     def add_transition(
         self,
@@ -2651,6 +2695,43 @@ class SeratoBridge:
             if track_obj and self.user_id is not None:
                 self.db.link_user_track(self.user_id, int(track_obj["id"]))
 
+        if not track_obj and title:
+            canonical = re.sub(r"[^a-z0-9]+", "-", f"{artist}-{title}".strip().lower()).strip("-") or "serato-track"
+            virtual_path = f"virtual://serato-live/{canonical}.mp3"
+            fallback_bpm = float(bpm if bpm is not None else 124.0)
+            fallback_key = str(key or "8A").strip() or "8A"
+            digest = hashlib.sha1(f"{artist}-{title}-{fallback_bpm}-{fallback_key}".encode("utf-8")).hexdigest()
+            note_seed = int(digest[:6], 16) / float(16**6 - 1)
+            energy_seed = int(digest[6:12], 16) / float(16**6 - 1)
+            inferred = {
+                "file_path": virtual_path,
+                "file_hash": hashlib.sha1(virtual_path.encode("utf-8")).hexdigest(),
+                "title": title,
+                "artist": artist,
+                "album": "",
+                "duration": max(90.0, float(incoming.get("duration") or 360.0)),
+                "bpm": fallback_bpm,
+                "musical_key": fallback_key if not re.match(r"^\d+[AB]$", fallback_key, flags=re.IGNORECASE) else "A minor",
+                "camelot_key": fallback_key if re.match(r"^\d+[AB]$", fallback_key, flags=re.IGNORECASE) else "8A",
+                "energy": round(5.5 + energy_seed * 3.2, 2),
+                "note": round(5.8 + note_seed * 3.0, 2),
+                "genre": "unknown",
+                "tags": ["serato-live", source],
+                "features": {
+                    "bass": round(4.8 + energy_seed * 3.8, 2),
+                    "melodic": round(4.5 + note_seed * 3.6, 2),
+                    "percussion": round(4.6 + energy_seed * 3.9, 2),
+                    "brightness": round(4.0 + note_seed * 3.2, 2),
+                    "groove": round(4.7 + energy_seed * 3.5, 2),
+                    "danceability": round(5.2 + energy_seed * 3.2, 2),
+                    "analysis_confidence": 0.45,
+                    "source": "serato_live_inferred",
+                },
+            }
+            track_obj = self.db.upsert_track(inferred)
+            if self.user_id is not None:
+                self.db.link_user_track(self.user_id, int(track_obj["id"]))
+
         payload = {
             "title": title or (track_obj["title"] if track_obj else "Unknown Track"),
             "artist": artist or (track_obj["artist"] if track_obj else "Unknown Artist"),
@@ -3011,6 +3092,11 @@ class SeratoPushRequest(BaseModel):
 class ExternalSaveRequest(BaseModel):
     list_name: str = "wishlist"
     action: str = "save"
+    note: str = ""
+
+
+class ExternalListItemUpdateRequest(BaseModel):
+    list_name: str = ""
     note: str = ""
 
 
@@ -3449,7 +3535,13 @@ def cloud_status(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, 
 
 @app.get("/api/ai/status")
 def ai_status(test_remote: bool = Query(default=False)) -> Dict[str, Any]:
-    return ai_service.status(test_remote=test_remote)
+    status = ai_service.status(test_remote=test_remote)
+    status["internetEnrichment"] = {
+        "active": True,
+        "providers": ["itunes", "deezer", "musicbrainz"],
+        "note": "Online metadata enrichment is used for global search and external track intelligence.",
+    }
+    return status
 
 
 @app.get("/api/auth/config")
@@ -3948,6 +4040,16 @@ def get_track(track_id: int, user: Dict[str, Any] = Depends(get_current_user)) -
     return track
 
 
+@app.delete("/api/library/tracks/{track_id}")
+def delete_track_from_library(track_id: int, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    removed = db.unlink_user_track(user_id, int(track_id))
+    if not removed:
+        raise HTTPException(status_code=404, detail="Track not found in your library")
+    db.add_event("library.track_removed", {"track_id": int(track_id)}, user_id=user_id)
+    return {"ok": True, "removed": removed}
+
+
 @app.get("/api/search/unified")
 def search_unified(q: str = Query(default="", min_length=1), limit: int = 20, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     user_id = int(user["id"])
@@ -4079,10 +4181,34 @@ def external_track_save(
     if not row:
         raise HTTPException(status_code=404, detail="External track not found")
     user_id = int(user["id"])
+    action = (payload.action or "save").strip().lower() or "save"
+    list_name = (payload.list_name or "wishlist").strip() or "wishlist"
+
+    if action in {"remove", "delete"}:
+        existing = db.list_external_list_items(list_name=list_name, limit=5000, user_id=user_id)
+        removed_count = 0
+        for item in existing:
+            if int(item.get("external_track_id") or 0) != int(external_id):
+                continue
+            if db.remove_external_list_item(int(item["id"]), user_id=user_id):
+                removed_count += 1
+        db.add_event(
+            "external.remove",
+            {
+                "external_track_id": external_id,
+                "title": row["title"],
+                "artist": row["artist"],
+                "list_name": list_name,
+                "removed": removed_count,
+            },
+            user_id=user_id,
+        )
+        return {"ok": True, "removed": removed_count, "track": row}
+
     saved = db.add_external_list_item(
         external_track_id=external_id,
-        list_name=(payload.list_name or "wishlist").strip() or "wishlist",
-        action=(payload.action or "save").strip() or "save",
+        list_name=list_name,
+        action=action,
         note=payload.note or "",
         user_id=user_id,
     )
@@ -4092,12 +4218,41 @@ def external_track_save(
             "external_track_id": external_id,
             "title": row["title"],
             "artist": row["artist"],
-            "list_name": payload.list_name,
-            "action": payload.action,
+            "list_name": list_name,
+            "action": action,
         },
         user_id=user_id,
     )
     return {"saved": saved, "track": row}
+
+
+@app.patch("/api/external/list-items/{item_id}")
+def external_list_item_update(
+    item_id: int,
+    payload: ExternalListItemUpdateRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    updated = db.update_external_list_item(
+        item_id=item_id,
+        list_name=(payload.list_name or "").strip() or None,
+        note=payload.note,
+        user_id=user_id,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="List item not found")
+    db.add_event("external.list_item_update", {"item_id": item_id, "list_name": updated.get("list_name")}, user_id=user_id)
+    return {"ok": True, "item": updated}
+
+
+@app.delete("/api/external/list-items/{item_id}")
+def external_list_item_delete(item_id: int, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    removed = db.remove_external_list_item(item_id=item_id, user_id=user_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="List item not found")
+    db.add_event("external.list_item_delete", {"item_id": item_id}, user_id=user_id)
+    return {"ok": True}
 
 
 @app.get("/api/recommendations/{track_id}")
@@ -4149,6 +4304,22 @@ def transition_analyze(payload: TransitionRequest, user: Dict[str, Any] = Depend
     )
     return {
         "transition": saved,
+        "analysis": analysis,
+        "trackA": track_a,
+        "trackB": track_b,
+    }
+
+
+@app.post("/api/transition/preview")
+def transition_preview(payload: TransitionRequest, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = int(user["id"])
+    track_a = resolve_track_for_user(payload.track_a_id, user_id, allow_link=True)
+    track_b = resolve_track_for_user(payload.track_b_id, user_id, allow_link=True)
+    if not track_a or not track_b:
+        raise HTTPException(status_code=404, detail="Track A or B not found")
+
+    analysis = analyze_transition(track_a, track_b, ai_service)
+    return {
         "analysis": analysis,
         "trackA": track_a,
         "trackB": track_b,

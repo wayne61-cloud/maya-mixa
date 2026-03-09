@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fr">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -1722,19 +1722,19 @@
       <div class="top-status">
         <div class="status-pill" id="bridgeStatus">
           <span class="status-dot"></span>
-          <span id="bridgeStatusText">Serato: connecting...</span>
+          <span id="bridgeStatusText">Serato: connexion...</span>
         </div>
         <div class="status-pill" id="socketStatus">
           <span class="status-dot"></span>
-          <span id="socketStatusText">WebSocket: ready (local)</span>
+          <span id="socketStatusText">IA: initialisation...</span>
         </div>
       </div>
       <div class="user-quick">
         <button class="user-name-btn" id="openAccountBtn" type="button">Profil DJ</button>
-        <button class="logout-btn-mini" id="logoutBtn" type="button">Logout</button>
+        <button class="logout-btn-mini" id="logoutBtn" type="button">Déconnexion</button>
       </div>
       <div class="live-controls">
-        <button class="live-btn" id="liveToggle" type="button">LIVE MODE</button>
+        <button class="live-btn" id="liveToggle" type="button">MODE LIVE</button>
         <div class="toggle-border" title="Live switch">
           <input type="checkbox" id="liveToggleSwitch" />
           <label for="liveToggleSwitch">
@@ -1747,36 +1747,36 @@
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-title">Navigation</div>
       <div class="nav-item active" data-screen="now-playing">
-        <span>Now Playing</span><span class="kbd">1</span>
+        <span>En cours</span><span class="kbd">1</span>
       </div>
       <div class="nav-item" data-screen="library">
-        <span>Library</span><span class="kbd">2</span>
+        <span>Bibliothèque</span><span class="kbd">2</span>
       </div>
       <div class="nav-item" data-screen="transitions">
-        <span>Transition Lab</span><span class="kbd">3</span>
+        <span>Lab Transitions</span><span class="kbd">3</span>
       </div>
       <div class="nav-item" data-screen="analysis">
-        <span>Analysis</span><span class="kbd">4</span>
+        <span>Analyse</span><span class="kbd">4</span>
       </div>
       <div class="nav-item" data-screen="history">
-        <span>History</span><span class="kbd">5</span>
+        <span>Session</span><span class="kbd">5</span>
       </div>
       <div class="nav-item" data-screen="account">
-        <span>Account</span><span class="kbd">6</span>
+        <span>Compte</span><span class="kbd">6</span>
       </div>
       <div class="sidebar-title">Shortcuts</div>
       <div class="card" style="margin-top: 8px;">
         <div style="font-size:0.85rem; color: var(--text-secondary); display:grid; gap:6px;">
-          <div><strong>1-6</strong> Switch screens</div>
-          <div><strong>L</strong> Toggle live mode</div>
-          <div><strong>Esc</strong> Exit live mode</div>
+          <div><strong>1-6</strong> Changer d'écran</div>
+          <div><strong>L</strong> Basculer mode live</div>
+          <div><strong>Esc</strong> Quitter le live</div>
         </div>
       </div>
     </aside>
 
     <main class="main-content" id="mainContent">
       <section class="screen active" id="now-playing">
-        <h1 class="screen-title">Now Playing</h1>
+        <h1 class="screen-title">Lecture en cours</h1>
         <div class="grid-2">
           <article class="card">
             <div class="card-title">Deck A</div>
@@ -1804,7 +1804,7 @@
           </article>
 
           <article class="card">
-            <div class="card-title">AI Next Pick (Deck B)</div>
+            <div class="card-title">Prochaine sélection IA (Deck B)</div>
             <div class="track-name" id="nextTrackName">-</div>
             <div class="track-artist" id="nextTrackArtist">-</div>
             <div class="row">
@@ -1819,7 +1819,7 @@
             </div>
             <div style="margin-top:12px;">
               <div style="display:flex; justify-content:space-between; align-items:center;">
-                <small style="color: var(--text-secondary);">Compatibility</small>
+                <small style="color: var(--text-secondary);">Compatibilité</small>
                 <strong id="nextCompatibility" class="pulse-badge">--%</strong>
               </div>
               <div class="progress-wrap" style="height: 8px; margin-top: 6px;">
@@ -1831,31 +1831,31 @@
         </div>
 
         <article class="card" style="margin-top:14px;">
-          <div class="card-title">AI Suggestions</div>
+          <div class="card-title">Suggestions IA</div>
           <div class="results-grid" id="nowRecommendations"></div>
         </article>
       </section>
 
       <section class="screen" id="library">
-        <h1 class="screen-title">Library Intelligence</h1>
+        <h1 class="screen-title">Intelligence Bibliothèque</h1>
         <article class="card">
           <div class="row">
-            <input class="search-box" id="searchInput" type="text" placeholder="Search by title, artist, genre, tag, BPM or key (e.g. techno 126 8A)" />
-            <button class="btn glow-btn" type="button" id="searchSubmitBtn">Search</button>
-            <button class="btn ghost" type="button" id="appleSyncBtn">Sync Apple Catalog</button>
+            <input class="search-box" id="searchInput" type="text" placeholder="Recherche par titre, artiste, genre, BPM, clé (ex: techno 126 8A)" />
+            <button class="btn glow-btn" type="button" id="searchSubmitBtn">Rechercher</button>
+            <button class="btn ghost" type="button" id="appleSyncBtn">Sync Apple Music</button>
           </div>
           <div class="filter-grid">
             <div class="animated-field">
               <input id="bpmFilterInput" type="text" placeholder=" " />
-              <label for="bpmFilterInput">BPM filter (ex: 126)</label>
+              <label for="bpmFilterInput">Filtre BPM (ex: 126)</label>
             </div>
             <div class="animated-field">
               <input id="keyFilterInput" type="text" placeholder=" " />
-              <label for="keyFilterInput">Key filter (ex: 8A)</label>
+              <label for="keyFilterInput">Filtre clé (ex: 8A)</label>
             </div>
             <div class="animated-field">
               <input id="energyFilterInput" type="text" placeholder=" " />
-              <label for="energyFilterInput">Energy min (0-10)</label>
+              <label for="energyFilterInput">Énergie min (0-10)</label>
             </div>
           </div>
           <div class="row" style="margin-top:10px;">
@@ -1865,16 +1865,16 @@
             <button class="btn ghost" type="button" data-quick-search="8A">8A</button>
           </div>
           <div class="row" style="margin-top:10px;">
-            <button class="btn ghost search-tab active" type="button" data-search-tab="local">My Library</button>
-            <button class="btn ghost search-tab" type="button" data-search-tab="global">Global Search</button>
-            <button class="btn ghost search-tab" type="button" data-search-tab="matches">Matches For Current Track</button>
+            <button class="btn ghost search-tab active" type="button" data-search-tab="local">Ma bibliothèque</button>
+            <button class="btn ghost search-tab" type="button" data-search-tab="global">Recherche globale</button>
+            <button class="btn ghost search-tab" type="button" data-search-tab="matches">Matches track en cours</button>
           </div>
           <div class="row" style="margin-top:10px;">
-            <input class="input" id="libraryPathInput" type="text" placeholder="Path to audio folder (e.g. /Users/.../Music)" />
-            <button class="btn glow-btn" type="button" id="scanLibraryBtn">Scan Audio</button>
+            <input class="input" id="libraryPathInput" type="text" placeholder="Chemin dossier audio (ex: /Users/.../Music)" />
+            <button class="btn glow-btn" type="button" id="scanLibraryBtn">Analyser audio</button>
           </div>
           <div class="coach-list">
-            <div class="coach-tip" id="scanStatus">No library scan launched yet.</div>
+            <div class="coach-tip" id="scanStatus">Aucun scan bibliothèque lancé.</div>
           </div>
         </article>
         <div id="libraryLocalPane">
@@ -1887,30 +1887,46 @@
           <div class="results-grid" id="matchesResults"></div>
         </div>
         <article class="card hidden" id="externalDetailCard" style="margin-top:12px;">
-          <div class="card-title">External Track Intelligence</div>
+          <div class="card-title">Intelligence Morceau Externe</div>
           <div id="externalDetailBody"></div>
           <div class="row" style="margin-top:10px;">
-            <button class="btn glow-btn" id="externalSaveWishlistBtn" type="button">Save to wishlist</button>
-            <button class="btn ghost" id="externalSaveCrateBtn" type="button">Add to prep crate</button>
-            <button class="btn glow-btn" id="externalTestLibraryBtn" type="button">Test with my library</button>
-            <button class="btn ghost" id="externalFindSimilarBtn" type="button">Find similar tracks</button>
+            <button class="btn glow-btn" id="externalSaveWishlistBtn" type="button">Ajouter wishlist</button>
+            <button class="btn ghost" id="externalSaveCrateBtn" type="button">Ajouter prep crate</button>
+            <button class="btn ghost" id="externalRemoveWishlistBtn" type="button">Retirer wishlist</button>
+            <button class="btn ghost" id="externalRemoveCrateBtn" type="button">Retirer prep crate</button>
+            <button class="btn glow-btn" id="externalTestLibraryBtn" type="button">Tester avec ma bibliothèque</button>
+            <button class="btn ghost" id="externalFindSimilarBtn" type="button">Trouver similaires</button>
+            <button class="btn glow-btn" id="externalOpenAnalysisBtn" type="button">Ouvrir dans Analyse</button>
           </div>
           <div class="coach-list" id="externalDetailHints"></div>
         </article>
       </section>
 
       <section class="screen" id="transitions">
-        <h1 class="screen-title">Transition Lab</h1>
+        <h1 class="screen-title">Lab Transitions</h1>
         <article class="card">
+          <div class="transition-layout" style="margin-bottom:10px;">
+            <div class="form-field">
+              <label class="label" for="trackAFilterInput">Recherche Track A</label>
+              <input class="input" id="trackAFilterInput" type="text" placeholder="Filtrer par titre/artiste/BPM/clé" />
+            </div>
+            <div></div>
+            <div class="form-field">
+              <label class="label" for="trackBFilterInput">Recherche Track B</label>
+              <input class="input" id="trackBFilterInput" type="text" placeholder="Filtrer par titre/artiste/BPM/clé" />
+            </div>
+          </div>
           <div class="transition-layout">
             <div class="form-field">
-              <label class="label" for="trackASelect">Track A (Playing)</label>
+              <label class="label" for="trackASelect">Track A (en cours)</label>
               <select id="trackASelect"></select>
+              <div class="coach-list" id="trackAPreview"></div>
             </div>
-            <button class="btn glow-btn" type="button" id="analyzeBtn">ANALYZE</button>
+            <button class="btn glow-btn" type="button" id="analyzeBtn">ANALYSER</button>
             <div class="form-field">
-              <label class="label" for="trackBSelect">Track B (Next)</label>
+              <label class="label" for="trackBSelect">Track B (suivant)</label>
               <select id="trackBSelect"></select>
+              <div class="coach-list" id="trackBPreview"></div>
             </div>
           </div>
           <div class="analyze-result" id="transitionResult"></div>
@@ -1918,24 +1934,25 @@
       </section>
 
       <section class="screen" id="analysis">
-        <h1 class="screen-title">Track Analysis</h1>
+        <h1 class="screen-title">Analyse Morceau</h1>
         <article class="card" style="margin-bottom: 12px;">
           <div class="form-field">
-            <label class="label" for="analysisTrackSelect">Track</label>
+            <label class="label" for="analysisTrackSelect">Morceau</label>
             <select id="analysisTrackSelect"></select>
           </div>
+          <div class="coach-list" id="analysisSourceTag"></div>
         </article>
         <div class="analysis-kpis" id="analysisKpis"></div>
         <div class="analysis-grid">
           <article class="card">
-            <div class="card-title">Track DNA</div>
+            <div class="card-title">ADN Morceau</div>
             <div class="energy-ring" id="analysisEnergyRing" style="--energy-value: 0;">
               <div class="energy-ring-value" id="analysisEnergyRingValue">0%</div>
             </div>
             <div id="analysisDna"></div>
           </article>
           <article class="card">
-            <div class="card-title">AI Compatibility Outlook</div>
+            <div class="card-title">Compatibilité IA</div>
             <div id="analysisOutlook"></div>
           </article>
         </div>
@@ -1946,62 +1963,84 @@
       </section>
 
       <section class="screen" id="history">
-        <h1 class="screen-title">Set History</h1>
+        <h1 class="screen-title">Session & Historique</h1>
+        <article class="card" style="margin-bottom:12px;">
+          <div class="card-title">Mode Session (playlist DJ)</div>
+          <div class="row" style="align-items:flex-start; gap:12px;">
+            <div style="flex:1; min-width:260px;">
+              <div style="font-size:0.85rem; color:var(--text-secondary); margin-bottom:8px;">Morceaux disponibles</div>
+              <div class="history-list" id="sessionBuilderAvailable"></div>
+            </div>
+            <div style="flex:1; min-width:260px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <div style="font-size:0.85rem; color:var(--text-secondary);">Liste sélectionnée</div>
+                <button class="btn ghost" id="sessionBuilderClearBtn" type="button">Vider</button>
+              </div>
+              <div class="history-list" id="sessionBuilderSelected"></div>
+              <div class="coach-tip" id="sessionBuilderTotal">Durée totale: 00:00</div>
+            </div>
+          </div>
+          <div class="card-title" style="margin-top:10px;">Propositions IA de transition</div>
+          <div class="coach-list" id="sessionBuilderTransitions"></div>
+        </article>
         <div class="history-grid">
           <article class="card">
-            <div class="card-title">Average Compatibility</div>
+            <div class="card-title">Compatibilité moyenne</div>
             <div class="history-metric" id="historyAvg">0%</div>
-            <small style="color:var(--text-secondary);">From analyzed transitions</small>
+            <small style="color:var(--text-secondary);">Sur vos transitions analysées</small>
           </article>
           <article class="card">
-            <div class="card-title">Transitions Analyzed</div>
+            <div class="card-title">Transitions analysées</div>
             <div class="history-metric" id="historyTransitions">0</div>
-            <small style="color:var(--text-secondary);">Current session</small>
+            <small style="color:var(--text-secondary);">Votre session</small>
           </article>
           <article class="card">
-            <div class="card-title">Serato Track Switches</div>
+            <div class="card-title">Switch tracks Serato</div>
             <div class="history-metric" id="historySwitches">0</div>
-            <small style="color:var(--text-secondary);">Detected by bridge</small>
+            <small style="color:var(--text-secondary);">Détectés automatiquement</small>
           </article>
         </div>
 
         <article class="card">
-          <div class="card-title">Multi-device WebSocket</div>
+          <div class="card-title">Connexion Serato Automatique</div>
           <div class="row">
             <select id="seratoModeSelect">
-              <option value="relay_websocket">Bridge mode: Cloud Relay (local WS -> cloud)</option>
-              <option value="websocket">Bridge mode: WebSocket</option>
-              <option value="history">Bridge mode: Serato History Folder</option>
-              <option value="feed_file">Bridge mode: JSON Feed File</option>
+              <option value="relay_websocket">Mode auto (recommandé)</option>
+              <option value="websocket">Mode WebSocket direct</option>
+              <option value="history">Mode dossier Serato History</option>
+              <option value="feed_file">Mode fichier JSON local</option>
             </select>
-            <input class="input" id="wsUrlInput" type="text" placeholder="ws://localhost:8787 (optional remote sync)" />
+            <input class="input" id="wsUrlInput" type="text" placeholder="ws://127.0.0.1:8787 (auto par défaut)" />
           </div>
+          <details style="margin-top:8px;">
+            <summary style="cursor:pointer; color:var(--text-secondary);">Options avancées (facultatif)</summary>
+            <div class="row" style="margin-top:8px;">
+            <input class="input" id="historyPathInput" type="text" placeholder="~/Music/_Serato_/History/Sessions (mode history)" />
+            <input class="input" id="feedPathInput" type="text" placeholder="/path/to/serato_feed.json (mode fichier feed)" />
+            </div>
+          </details>
           <div class="row" style="margin-top:8px;">
-            <input class="input" id="historyPathInput" type="text" placeholder="~/Music/_Serato_/History/Sessions (for history mode)" />
-            <input class="input" id="feedPathInput" type="text" placeholder="/path/to/serato_feed.json (for feed file mode)" />
-          </div>
-          <div class="row" style="margin-top:8px;">
-            <button class="btn" id="wsConnectBtn" type="button">Connect Bridge</button>
-            <button class="btn ghost" id="wsDisconnectBtn" type="button">Disconnect</button>
-            <button class="btn ghost" id="startSessionBtn" type="button">Start Session</button>
-            <button class="btn ghost" id="endSessionBtn" type="button">End Session</button>
-            <button class="btn ghost" id="exportJsonBtn" type="button">Export JSON</button>
-            <button class="btn ghost" id="exportCsvBtn" type="button">Export CSV</button>
+            <button class="btn" id="wsConnectBtn" type="button">Connecter Serato</button>
+            <button class="btn ghost" id="wsDisconnectBtn" type="button">Déconnecter</button>
+            <button class="btn ghost" id="startSessionBtn" type="button">Démarrer session</button>
+            <button class="btn ghost" id="endSessionBtn" type="button">Finir session</button>
+            <button class="btn ghost" id="exportJsonBtn" type="button">Exporter JSON</button>
+            <button class="btn ghost" id="exportCsvBtn" type="button">Exporter CSV</button>
           </div>
           <div class="coach-list">
-            <div class="coach-tip" id="wsStatusDetail">Local sync ready. Remote not connected.</div>
+            <div class="coach-tip" id="wsStatusDetail">Connexion Serato en attente...</div>
             <div class="coach-tip" id="sessionStatusDetail">Session inactive.</div>
           </div>
         </article>
 
         <article class="card" style="margin-top:12px;">
-          <div class="card-title">Recent Events</div>
+          <div class="card-title">Événements récents</div>
           <div class="history-list" id="historyEvents"></div>
         </article>
       </section>
 
       <section class="screen" id="account">
-        <h1 class="screen-title">User Universe</h1>
+        <h1 class="screen-title">Univers Utilisateur</h1>
         <div class="account-grid">
           <article class="card">
             <div class="card-title">Profil Utilisateur</div>
@@ -2010,15 +2049,15 @@
               <input class="input" id="profileEmailInput" type="text" readonly />
             </div>
             <div class="form-field" style="margin-top:10px;">
-              <label class="label" for="profileDisplayNameInput">Display Name</label>
+              <label class="label" for="profileDisplayNameInput">Nom affiché</label>
               <input class="input" id="profileDisplayNameInput" type="text" />
             </div>
             <div class="form-field" style="margin-top:10px;">
-              <label class="label" for="profileDjNameInput">DJ Name</label>
+              <label class="label" for="profileDjNameInput">Nom DJ</label>
               <input class="input" id="profileDjNameInput" type="text" />
             </div>
             <div class="row" style="margin-top:10px;">
-              <button class="btn glow-btn" id="profileSaveBtn" type="button">Save Profile</button>
+              <button class="btn glow-btn" id="profileSaveBtn" type="button">Sauvegarder profil</button>
             </div>
           </article>
 
@@ -2044,14 +2083,14 @@
 
         <div class="account-grid" style="margin-top:12px;">
           <article class="card">
-            <div class="card-title">DJ Runtime Dashboard</div>
+            <div class="card-title">Dashboard DJ Runtime</div>
             <div class="analysis-kpis">
               <div class="kpi-tile">
                 <div class="kpi-label">Session</div>
                 <div class="kpi-value" id="profileSessionStatus">Inactive</div>
               </div>
               <div class="kpi-tile">
-                <div class="kpi-label">Session Time</div>
+                <div class="kpi-label">Temps session</div>
                 <div class="kpi-value" id="profileSessionTime">00:00:00</div>
               </div>
               <div class="kpi-tile">
@@ -2059,7 +2098,7 @@
                 <div class="kpi-value" id="profileCloudStatus">Unknown</div>
               </div>
               <div class="kpi-tile">
-                <div class="kpi-label">AI Tips</div>
+                <div class="kpi-label">Conseils IA</div>
                 <div class="kpi-value" id="profileAiTipsCount">0</div>
               </div>
             </div>
@@ -2067,8 +2106,8 @@
           </article>
 
           <article class="card">
-            <div class="card-title">Favorites + DJ Patterns</div>
-            <div class="coach-tip"><strong>Top Played Tracks</strong></div>
+            <div class="card-title">Favoris + Patterns DJ</div>
+            <div class="coach-tip"><strong>Tracks les plus jouées</strong></div>
             <div class="profile-stack" id="profileTopTracks"></div>
             <div class="coach-tip" style="margin-top:8px;"><strong>Wishlist</strong></div>
             <div class="profile-stack" id="profileWishlist"></div>
@@ -2111,13 +2150,13 @@
           <span id="liveBpm">-- BPM</span>
           <span id="liveKey">--</span>
           <span id="liveNote">Note --/10</span>
-          <span id="liveEnergy">Energy --</span>
+          <span id="liveEnergy">Énergie --</span>
         </div>
       </article>
       <article class="live-panel">
-        <div class="live-window" id="liveMixWindow">Mix window --</div>
-        <div class="live-countdown" id="liveCountdown">Waiting for bridge data...</div>
-        <div class="slide-alert" id="liveAlert">Maya suggest: prepare deck B.</div>
+        <div class="live-window" id="liveMixWindow">Fenêtre de mix --</div>
+        <div class="live-countdown" id="liveCountdown">En attente du bridge...</div>
+        <div class="slide-alert" id="liveAlert">Maya suggère: prépare le deck B.</div>
       </article>
       <article class="live-panel">
         <div class="card-title" style="color: var(--accent-main); margin-bottom: 10px;">Transition Coach</div>
