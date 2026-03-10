@@ -154,23 +154,13 @@ async function main() {
 
     try {
       const providers = await api(base, "GET", "/api/music/providers", token);
-      const apple = providers?.providers?.apple_music || {};
-      if (!apple.connected) {
-        checks.push({
-          name: "apple-sync",
-          pass: true,
-          detail: "skipped (Apple Music non connecté)",
-        });
-      } else {
-        const appleSync = await api(base, "POST", "/api/music/providers/apple_music/sync", token, { limit: 80 });
-        checks.push({
-          name: "apple-sync",
-          pass: Number(appleSync?.fetched || 0) >= 0,
-          detail: `fetched=${appleSync?.fetched || 0} linked=${appleSync?.linked || 0}`,
-        });
-      }
+      checks.push({
+        name: "streaming-linking",
+        pass: providers?.enabled === false && Object.keys(providers?.providers || {}).length === 0,
+        detail: providers?.enabled === false ? "disabled (expected)" : "unexpectedly enabled",
+      });
     } catch (error) {
-      checks.push({ name: "apple-sync", pass: false, detail: String(error.message || error) });
+      checks.push({ name: "streaming-linking", pass: false, detail: String(error.message || error) });
     }
 
     try {

@@ -117,6 +117,12 @@ DEEZER_OAUTH_APP_ID = os.getenv("MAYA_DEEZER_APP_ID", "").strip()
 DEEZER_OAUTH_APP_SECRET = os.getenv("MAYA_DEEZER_APP_SECRET", "").strip()
 DEEZER_OAUTH_REDIRECT_URI = os.getenv("MAYA_DEEZER_REDIRECT_URI", "").strip()
 APPLE_MUSIC_DEVELOPER_TOKEN = os.getenv("MAYA_APPLE_MUSIC_DEVELOPER_TOKEN", "").strip()
+STREAMING_LINKING_ENABLED = os.getenv("MAYA_STREAMING_LINKING_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 AUTH_PASSWORDLESS = os.getenv("MAYA_AUTH_PASSWORDLESS", "true").strip().lower() in {"1", "true", "yes", "on"}
 SEED_NEW_USER_LIBRARY = os.getenv("MAYA_SEED_NEW_USER_LIBRARY", "false").strip().lower() in {"1", "true", "yes", "on"}
 SEED_BOOTSTRAP_ADMIN_LIBRARY = (
@@ -483,6 +489,15 @@ def music_frontend_redirect(request: Request, provider: str = "", connected: boo
     if not params:
         return f"{base_url}/"
     return f"{base_url}/?{urlencode(params)}"
+
+
+def ensure_streaming_linking_enabled() -> None:
+    if STREAMING_LINKING_ENABLED:
+        return
+    raise HTTPException(
+        status_code=410,
+        detail="Liaison Apple Music / Spotify / Deezer désactivée. Utilise la recherche globale internet.",
+    )
 
 
 def send_password_reset_email(to_email: str, reset_token: str, dj_name: str = "") -> Tuple[bool, str]:
@@ -4015,7 +4030,7 @@ class AdminUserUpdateRequest(BaseModel):
     status: Optional[str] = None
 
 
-app = FastAPI(title="Maya Mixa Backend", version="2.5.2")
+app = FastAPI(title="Maya Mixa Backend", version="2.5.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -4391,6 +4406,9 @@ def serialize_music_connection(connection: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def music_providers_status(user_id: int, request: Optional[Request] = None) -> Dict[str, Any]:
+    if not STREAMING_LINKING_ENABLED:
+        return {}
+
     rows = db.list_music_connections(user_id)
     by_provider = {str(row.get("provider") or "").strip().lower(): row for row in rows}
     configs = {
@@ -5406,20 +5424,34 @@ async def auth_oauth_callback(
 @app.get("/api/music/providers")
 def music_providers(request: Request, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     user_id = int(user["id"])
-    return {"providers": music_providers_status(user_id=user_id, request=request)}
+    providers = music_providers_status(user_id=user_id, request=request)
+    payload: Dict[str, Any] = {"enabled": STREAMING_LINKING_ENABLED, "providers": providers}
+    if not STREAMING_LINKING_ENABLED:
+        payload["message"] = "Liaison Apple Music / Spotify / Deezer désactivée. Utilise la recherche globale internet."
+    return payload
 
 
 @app.get("/api/music/providers/apple_music/config")
 def music_apple_config(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if not STREAMING_LINKING_ENABLED:
+        return {
+            "provider": "apple_music",
+            "configured": False,
+            "developerToken": "",
+            "enabled": False,
+            "message": "Liaison Apple Music désactivée. Utilise la recherche globale internet.",
+        }
     return {
         "provider": "apple_music",
         "configured": bool(APPLE_MUSIC_DEVELOPER_TOKEN),
         "developerToken": APPLE_MUSIC_DEVELOPER_TOKEN if APPLE_MUSIC_DEVELOPER_TOKEN else "",
+        "enabled": True,
     }
 
 
 @app.get("/api/music/providers/{provider}/start")
 def music_provider_start(provider: str, request: Request, auth_token: str = Query(default="")) -> RedirectResponse:
+    ensure_streaming_linking_enabled()
     provider_norm = provider.strip().lower()
     if provider_norm not in {"spotify", "deezer"}:
         redirect_url = music_frontend_redirect(request, provider=provider_norm, error="unsupported_provider")
@@ -5465,6 +5497,7 @@ def music_provider_callback(
     state: str = Query(default=""),
     error: str = Query(default=""),
 ) -> RedirectResponse:
+    ensure_streaming_linking_enabled()
     provider_norm = provider.strip().lower()
     if provider_norm not in {"spotify", "deezer"}:
         redirect_url = music_frontend_redirect(request, provider=provider_norm, error="unsupported_provider")
@@ -5601,6 +5634,7 @@ def music_apple_connect_token(
     payload: AppleMusicTokenConnectRequest,
     user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    ensure_streaming_linking_enabled()
     if not APPLE_MUSIC_DEVELOPER_TOKEN:
         raise HTTPException(status_code=503, detail="Apple Music developer token non configuré")
     user_token = str(payload.music_user_token or "").strip()
@@ -5648,6 +5682,7 @@ def music_provider_sync(
     payload: MusicProviderSyncRequest,
     user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    ensure_streaming_linking_enabled()
     provider_norm = provider.strip().lower()
     user_id = int(user["id"])
     limit = max(10, min(int(payload.limit or 120), 500))
@@ -5682,6 +5717,7 @@ def music_provider_sync(
 
 @app.post("/api/music/providers/{provider}/disconnect")
 def music_provider_disconnect(provider: str, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    ensure_streaming_linking_enabled()
     provider_norm = provider.strip().lower()
     if provider_norm not in {"spotify", "deezer", "apple_music"}:
         raise HTTPException(status_code=404, detail="Provider unsupported")
@@ -5955,7 +5991,7 @@ def sync_apple_catalog(
 ) -> Dict[str, Any]:
     raise HTTPException(
         status_code=410,
-        detail="Deprecated endpoint. Use /api/music/providers/apple_music/sync after Apple Music account connection.",
+        detail="Endpoint supprimé. Utilise la recherche globale internet (/api/search/unified) pour enrichir les morceaux externes.",
     )
 
 
@@ -5997,6 +6033,10 @@ def search_unified(q: str = Query(default="", min_length=1), limit: int = 20, us
     current_track = get_current_local_track(user_id=user_id, bridge_state=bridge_state)
     if not current_track:
         current_track = runtime_track_from_bridge_deck(bridge_state.get("deckA") or {}, deck_label="Deck A")
+    if not current_track:
+        fallback_tracks = db.list_tracks(limit=1, user_id=user_id)
+        if fallback_tracks:
+            current_track = fallback_tracks[0]
     enriched_rows = []
     for row in external_rows:
         entry = dict(row)
@@ -6065,12 +6105,32 @@ def external_track_detail(
     if not current_track:
         bridge_state = serato_bridges.get_state(user_id)
         current_track = runtime_track_from_bridge_deck(bridge_state.get("deckA") or {}, deck_label="Deck A")
+    if not current_track:
+        fallback_tracks = db.list_tracks(limit=1, user_id=user_id)
+        if fallback_tracks:
+            current_track = fallback_tracks[0]
+
+    runtime_external = external_track_to_runtime_with_defaults(row, reference_track=current_track)
+    external_view = dict(row)
+    external_view["duration"] = float(runtime_external.get("duration") or row.get("duration") or 0.0)
+    external_view["bpm"] = float(runtime_external.get("bpm") or row.get("bpm") or 0.0)
+    external_view["energy"] = float(runtime_external.get("energy") or row.get("energy") or 0.0)
+    external_view["note"] = float(runtime_external.get("note") or row.get("note") or 0.0)
+    external_view["camelot_key"] = str(runtime_external.get("camelot_key") or row.get("camelot_key") or "").strip().upper()
+    external_view["musical_key"] = str(runtime_external.get("musical_key") or row.get("musical_key") or "").strip()
+    external_view["genre"] = str(runtime_external.get("genre") or row.get("genre") or "unknown").strip().lower() or "unknown"
+    external_view["tags"] = runtime_external.get("tags") or row.get("tags") or []
+    intelligence = dict(external_view.get("intelligence") or {})
+    intelligence.setdefault("features", runtime_external.get("features") or {})
+    external_view["intelligence"] = intelligence
+    external_view["confidence"] = float((runtime_external.get("features") or {}).get("analysis_confidence") or row.get("confidence") or 0.0)
+
     current_analysis = None
     if current_track:
         try:
             current_analysis = analyze_transition(
                 current_track,
-                external_track_to_runtime_with_defaults(row, reference_track=current_track),
+                runtime_external,
                 ai_service,
                 allow_remote_tips=False,
             )
@@ -6079,7 +6139,7 @@ def external_track_detail(
 
     matches = score_external_against_library(row, limit=matches_limit, user_id=user_id)
     return {
-        "external": row,
+        "external": external_view,
         "currentTrack": current_track,
         "currentCompatibility": current_analysis,
         "libraryMatches": matches,

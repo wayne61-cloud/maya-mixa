@@ -2824,7 +2824,6 @@
           <div class="row">
             <input class="search-box" id="searchInput" type="text" placeholder="Recherche par titre, artiste, genre, BPM, clé (ex: techno 126 8A)" />
             <button class="btn glow-btn" type="button" id="searchSubmitBtn">Rechercher</button>
-            <button class="btn ghost" type="button" id="appleSyncBtn">Sync catalogue iTunes</button>
           </div>
           <div class="filter-grid">
             <div class="animated-field">
@@ -2858,15 +2857,17 @@
           <div class="path-drop-grid">
             <div class="path-drop-zone" id="musicDropZone">
               <div class="title">Drag & Drop Musique</div>
-              <div class="hint">Glisse un dossier/fichier audio ou une app musique (Apple Music/Spotify/Deezer).</div>
+              <div class="hint">Glisse un dossier/fichier audio ou ton app musique locale.</div>
               <div class="path" id="musicDropStatus">Le chemin sera copié automatiquement dans le champ scan.</div>
             </div>
           </div>
           <div class="coach-list">
             <div class="coach-tip" id="scanStatus">Aucun scan bibliothèque lancé. En desktop, Maya détecte automatiquement les dossiers musique.</div>
           </div>
-          <div class="card-title" style="margin-top:10px;">Sync catalogue streaming</div>
-          <div class="music-providers-grid" id="musicProvidersPanel"></div>
+          <div class="card-title" style="margin-top:10px;">Connecteurs streaming</div>
+          <div class="music-providers-grid" id="musicProvidersPanel">
+            <div class="coach-tip">Liaison Apple Music / Spotify / Deezer supprimée. Utilise Recherche globale internet.</div>
+          </div>
         </article>
         <div id="libraryLocalPane">
           <div class="results-grid" id="trackResults"></div>
@@ -3170,8 +3171,10 @@
               </div>
             </div>
             <div class="coach-list" id="profileAiTips"></div>
-            <div class="card-title" style="margin-top:10px;">Comptes music connectés</div>
-            <div class="music-providers-grid" id="profileMusicProviders"></div>
+            <div class="card-title" style="margin-top:10px;">Connecteurs streaming</div>
+            <div class="music-providers-grid" id="profileMusicProviders">
+              <div class="coach-tip">Liaison Apple Music / Spotify / Deezer supprimée. Utilise Recherche globale internet.</div>
+            </div>
           </article>
 
           <article class="card">

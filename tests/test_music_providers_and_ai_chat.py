@@ -35,18 +35,23 @@ def auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_music_providers_endpoint_returns_expected_shape() -> None:
+def test_music_providers_endpoint_is_disabled_and_explains_fallback() -> None:
     token, _ = register_user("MusicProvidersPass123!")
     response = client.get("/api/music/providers", headers=auth_headers(token))
     assert response.status_code == 200, response.text
     payload = response.json()
-    providers = payload.get("providers") or {}
-    assert "spotify" in providers
-    assert "deezer" in providers
-    assert "apple_music" in providers
-    assert providers["spotify"]["provider"] == "spotify"
-    assert providers["deezer"]["provider"] == "deezer"
-    assert providers["apple_music"]["provider"] == "apple_music"
+    assert payload.get("enabled") is False
+    assert payload.get("providers") == {}
+    message = str(payload.get("message") or "").lower()
+    assert "recherche globale internet" in message
+
+
+def test_music_provider_sync_endpoint_returns_410_when_disabled() -> None:
+    token, _ = register_user("ProviderSyncDisabled123!")
+    response = client.post("/api/music/providers/spotify/sync", headers=auth_headers(token), json={"limit": 50})
+    assert response.status_code == 410, response.text
+    detail = str(response.json().get("detail") or "").lower()
+    assert "désactivée" in detail
 
 
 def test_ai_chat_endpoint_returns_reply() -> None:
@@ -172,3 +177,45 @@ def test_search_unified_computes_compatibility_from_live_serato_deck_without_tra
     assert target is not None
     assert target.get("current_track_compatibility") is not None
     assert target.get("current_track_difficulty") in {"easy", "medium", "hard"}
+
+
+def test_external_detail_returns_fallback_metrics_when_source_metadata_is_sparse(monkeypatch) -> None:
+    token, _ = register_user("ExternalDetailDefaults123!")
+    headers = auth_headers(token)
+
+    sparse_source_track_id = f"sparse-{secrets.token_hex(4)}"
+    monkeypatch.setattr(
+        "backend.app.music_hub.search",
+        lambda q, limit=20: [
+            {
+                "source": "pytest",
+                "source_track_id": sparse_source_track_id,
+                "source_url": "",
+                "title": "Sparse External",
+                "artist": "Sparse Artist",
+                "duration": None,
+                "bpm": None,
+                "musical_key": "",
+                "camelot_key": "",
+                "energy": None,
+                "note": None,
+                "genre": "unknown",
+                "tags": [],
+                "metadata": {},
+            }
+        ],
+    )
+
+    search = client.get("/api/search/unified?q=sparse&limit=5", headers=headers)
+    assert search.status_code == 200, search.text
+    rows = search.json().get("global") or []
+    assert rows, "Expected at least one external row"
+
+    external_id = int(rows[0]["id"])
+    detail = client.get(f"/api/external/{external_id}?deep=true&matches_limit=5", headers=headers)
+    assert detail.status_code == 200, detail.text
+    external = detail.json().get("external") or {}
+    assert float(external.get("bpm") or 0) > 0
+    assert float(external.get("energy") or 0) > 0
+    assert float(external.get("note") or 0) > 0
+    assert external.get("camelot_key") or external.get("musical_key")

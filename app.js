@@ -2,7 +2,6 @@
   const AUTH_TOKEN_KEY = "maya_mixa_auth_token";
   const LAST_LOGIN_ID_KEY = "maya_mixa_last_login_id";
   const API_BASE_KEY = "maya_mixa_api_base";
-  const APPLE_SYNC_KEY = "maya_mixa_apple_sync_at";
   const SERATO_HISTORY_PATH_KEY = "maya_mixa_serato_history_path";
   const LIBRARY_SCAN_PATH_KEY = "maya_mixa_library_scan_path";
   const DEFAULT_CLOUD_API_BASE = "https://maya-mixa-cloud.onrender.com";
@@ -152,7 +151,6 @@
 
     searchInput: document.getElementById("searchInput"),
     searchSubmitBtn: document.getElementById("searchSubmitBtn"),
-    appleSyncBtn: document.getElementById("appleSyncBtn"),
     bpmFilterInput: document.getElementById("bpmFilterInput"),
     keyFilterInput: document.getElementById("keyFilterInput"),
     energyFilterInput: document.getElementById("energyFilterInput"),
@@ -411,26 +409,6 @@
     setAuthFeedback("Backend API indisponible. Vérifie internet puis réessaie.", "error");
     updateApiConfigUi();
     return false;
-  }
-
-  function getAppleSyncTimestamp() {
-    try {
-      return String(localStorage.getItem(APPLE_SYNC_KEY) || "").trim();
-    } catch (_) {
-      return "";
-    }
-  }
-
-  function setAppleSyncTimestamp(isoValue) {
-    try {
-      if (!isoValue) {
-        localStorage.removeItem(APPLE_SYNC_KEY);
-      } else {
-        localStorage.setItem(APPLE_SYNC_KEY, isoValue);
-      }
-    } catch (_) {
-      // Ignore storage errors.
-    }
   }
 
   function getRememberedLoginId() {
@@ -933,14 +911,7 @@
     const value = normalizeDroppedPath(raw).toLowerCase();
     if (!value) return false;
     if (!(value.endsWith(".app") || value.endsWith(".exe"))) return false;
-    return (
-      value.includes("music.app") ||
-      value.includes("apple music") ||
-      value.endsWith("itunes.app") ||
-      value.endsWith("itunes.exe") ||
-      value.includes("spotify") ||
-      value.includes("deezer")
-    );
+    return value.includes("music.app") || value.endsWith("itunes.app") || value.endsWith("itunes.exe");
   }
 
   function deriveMusicLibraryPath(raw) {
@@ -1220,183 +1191,15 @@
     }
   }
 
-  function providerDisplayName(provider) {
-    const map = {
-      spotify: "Spotify",
-      deezer: "Deezer",
-      apple_music: "Apple Music",
-    };
-    return map[String(provider || "").toLowerCase()] || String(provider || "Provider");
-  }
-
-  function providerStateLabel(providerState) {
-    if (!providerState?.configured) return { text: "Non configuré", cls: "offline" };
-    if (providerState?.connected) return { text: "Connecté", cls: "connected" };
-    return { text: "Prêt à connecter", cls: "" };
-  }
-
-  function buildMusicProviderCard(providerState = {}) {
-    const provider = String(providerState.provider || "").toLowerCase();
-    const stateTag = providerStateLabel(providerState);
-    const connection = providerState.connection || {};
-    const mail = connection.externalEmail ? ` • ${esc(connection.externalEmail)}` : "";
-    const expiresAt = connection.expiresAt ? `Expire: ${new Date(connection.expiresAt).toLocaleString()}` : "Token: session active";
-    const canConnect = Boolean(providerState.configured);
-    const canSync = Boolean(providerState.configured && providerState.connected);
-    const canDisconnect = Boolean(providerState.connected);
-    const baseMeta = providerState.configured
-      ? providerState.connected
-        ? `Compte lié${mail}`
-        : "Compte non lié"
-      : "Configure les variables backend";
-    return `
-      <article class="provider-card" data-provider-card="${esc(provider)}">
-        <div class="provider-head">
-          <div class="provider-title">${esc(providerDisplayName(provider))}</div>
-          <span class="provider-state ${stateTag.cls}">${esc(stateTag.text)}</span>
-        </div>
-        <div class="provider-meta">
-          <div>${esc(baseMeta)}</div>
-          <div>${esc(expiresAt)}</div>
-        </div>
-        <div class="provider-actions">
-          <button class="btn glow-btn" type="button" data-provider-connect="${esc(provider)}" ${canConnect ? "" : "disabled"}>Connecter</button>
-          <button class="btn ghost" type="button" data-provider-sync="${esc(provider)}" ${canSync ? "" : "disabled"}>Sync</button>
-          <button class="btn ghost" type="button" data-provider-disconnect="${esc(provider)}" ${canDisconnect ? "" : "disabled"}>Déconnecter</button>
-        </div>
-      </article>
-    `;
-  }
-
   function renderMusicProvidersPanels() {
-    const providers = state.musicProviders || {};
-    const rows = ["spotify", "deezer", "apple_music"].map((key) => providers[key]).filter(Boolean);
-    const html = rows.length
-      ? rows.map((providerState) => buildMusicProviderCard(providerState)).join("")
-      : `<div class="coach-tip">Providers en attente. Connecte le backend API puis recharge.</div>`;
+    const html = `<div class="coach-tip">Liaison Apple Music / Spotify / Deezer supprimée. Utilise Recherche globale internet pour trouver et analyser les morceaux.</div>`;
     if (el.musicProvidersPanel) el.musicProvidersPanel.innerHTML = html;
     if (el.profileMusicProviders) el.profileMusicProviders.innerHTML = html;
   }
 
   async function refreshMusicProviders() {
-    try {
-      const payload = await api("GET", "/api/music/providers");
-      state.musicProviders = payload?.providers || {};
-    } catch (_) {
-      state.musicProviders = {};
-    }
+    state.musicProviders = {};
     renderMusicProvidersPanels();
-  }
-
-  async function ensureMusicKitLoaded() {
-    if (window.MusicKit) return true;
-    await new Promise((resolve, reject) => {
-      const existing = document.querySelector('script[data-maya-musickit="1"]');
-      if (existing) {
-        existing.addEventListener("load", () => resolve(true), { once: true });
-        existing.addEventListener("error", () => reject(new Error("MusicKit load failed")), { once: true });
-        return;
-      }
-      const script = document.createElement("script");
-      script.src = "https://js-cdn.music.apple.com/musickit/v1/musickit.js";
-      script.async = true;
-      script.dataset.mayaMusickit = "1";
-      script.onload = () => resolve(true);
-      script.onerror = () => reject(new Error("MusicKit load failed"));
-      document.head.appendChild(script);
-    });
-    return Boolean(window.MusicKit);
-  }
-
-  async function connectAppleMusicWithMusicKit() {
-    const config = await api("GET", "/api/music/providers/apple_music/config");
-    if (!config?.configured || !config?.developerToken) {
-      throw new Error("Apple Music n'est pas configuré côté backend.");
-    }
-    await ensureMusicKitLoaded();
-    if (!window.MusicKit) throw new Error("MusicKit indisponible sur ce navigateur.");
-    try {
-      window.MusicKit.configure({
-        developerToken: config.developerToken,
-        app: { name: "Maya Mixa", build: "2.6" },
-      });
-    } catch (_) {
-      // Déjà configuré.
-    }
-    const music = window.MusicKit.getInstance();
-    const musicUserToken = await music.authorize();
-    if (!musicUserToken) throw new Error("Autorisation Apple Music refusée");
-    await api("POST", "/api/music/providers/apple_music/connect-token", {
-      music_user_token: musicUserToken,
-      storefront: music.storefrontId || "",
-      profile_name: state.auth.user?.dj_name || state.auth.user?.display_name || "",
-    });
-    showToast("Apple Music connecté");
-  }
-
-  async function startMusicProviderConnect(provider) {
-    const key = String(provider || "").toLowerCase();
-    const stateProvider = state.musicProviders?.[key] || {};
-    if (!state.auth.token) {
-      showToast("Connexion requise");
-      return;
-    }
-    if (!stateProvider.configured) {
-      showToast(`${providerDisplayName(key)} non configuré sur le backend.`);
-      return;
-    }
-    if (key === "apple_music") {
-      try {
-        await connectAppleMusicWithMusicKit();
-        await refreshMusicProviders();
-      } catch (error) {
-        showToast(`Apple Music: ${humanizeError(error)}`);
-      }
-      return;
-    }
-    const path = `/api/music/providers/${encodeURIComponent(key)}/start?auth_token=${encodeURIComponent(state.auth.token)}`;
-    const url = runtimeConfig.apiBase ? `${runtimeConfig.apiBase}${path}` : path;
-    window.location.href = url;
-  }
-
-  async function syncMusicProvider(provider) {
-    const key = String(provider || "").toLowerCase();
-    const stateProvider = state.musicProviders?.[key] || {};
-    if (!stateProvider.connected) {
-      showToast(`${providerDisplayName(key)} doit être connecté avant la sync.`);
-      return;
-    }
-    try {
-      const payload = await api("POST", `/api/music/providers/${encodeURIComponent(key)}/sync`, { limit: 220 });
-      const created = Number(payload?.created || 0);
-      const updated = Number(payload?.updated || 0);
-      const fetched = Number(payload?.fetched || payload?.discovered || 0);
-      await refreshMusicProviders();
-      await loadTracks();
-      await runUnifiedSearch();
-      await refreshRecommendations();
-      await refreshHistory();
-      await refreshAccountDashboard();
-      showToast(`Sync ${providerDisplayName(key)} OK (${fetched} • +${created}/${updated})`);
-    } catch (error) {
-      showToast(`Sync ${providerDisplayName(key)} impossible: ${humanizeError(error)}`);
-    }
-  }
-
-  async function disconnectMusicProvider(provider) {
-    const key = String(provider || "").toLowerCase();
-    const stateProvider = state.musicProviders?.[key] || {};
-    if (!stateProvider.connected) {
-      showToast(`${providerDisplayName(key)} déjà déconnecté.`);
-      return;
-    }
-    try {
-      await api("POST", `/api/music/providers/${encodeURIComponent(key)}/disconnect`, {});
-      await refreshMusicProviders();
-      showToast(`${providerDisplayName(key)} déconnecté`);
-    } catch (error) {
-      showToast(`Déconnexion ${providerDisplayName(key)} impossible: ${humanizeError(error)}`);
-    }
   }
 
   function appendMayaChatMessage(role, text) {
@@ -1647,12 +1450,8 @@
       const provider = (params.get("music_provider") || "").trim();
       const connected = (params.get("music_connected") || "").trim();
       const error = (params.get("music_error") || "").trim();
-      if (!provider && !connected && !error) return;
-
-      if (connected === "1") {
-        showToast(`${providerDisplayName(provider)} connecté`);
-      } else if (error) {
-        showToast(`${providerDisplayName(provider)}: ${error}`);
+      if (provider || connected || error) {
+        showToast("Liaison streaming externe désactivée. Utilise la recherche globale internet.");
       }
 
       params.delete("music_provider");
@@ -3479,9 +3278,6 @@
   async function refreshAccountDashboard() {
     try {
       state.accountDashboard = await api("GET", "/api/account/dashboard");
-      if (state.accountDashboard?.musicProviders) {
-        state.musicProviders = state.accountDashboard.musicProviders;
-      }
       renderAccountDashboard();
       renderMusicProvidersPanels();
     } catch (error) {
@@ -3591,45 +3387,6 @@
       el.scanStatus.textContent = `Scan impossible: ${msg}`;
       showToast(`Scan impossible: ${msg}`);
     }
-  }
-
-  async function syncAppleCatalog() {
-    if (el.appleSyncBtn) el.appleSyncBtn.disabled = true;
-    try {
-      const appleProvider = state.musicProviders?.apple_music || {};
-      if (!appleProvider.connected) throw new Error("Apple Music non connecté.");
-      const payload = await api("POST", "/api/music/providers/apple_music/sync", { limit: 220 });
-      state.lastAppleSyncAt = new Date().toISOString();
-      setAppleSyncTimestamp(state.lastAppleSyncAt);
-      const discovered = Number(
-        payload?.externalEnriched || payload?.fetched || payload?.uniqueExternalTracks || payload?.discovered || 0
-      );
-      const sourceLabel = "Apple Music";
-      el.scanStatus.textContent = `Sync ${sourceLabel} terminée: ${discovered} morceaux traités.`;
-      await loadTracks();
-      await runUnifiedSearch();
-      await refreshHistory();
-      await refreshAccountDashboard();
-      showToast(`Sync ${sourceLabel} OK (${discovered})`);
-    } catch (error) {
-      showToast(`Sync Apple impossible: ${humanizeError(error)}`);
-    } finally {
-      if (el.appleSyncBtn) el.appleSyncBtn.disabled = false;
-    }
-  }
-
-  async function maybeAutoSyncAppleCatalog() {
-    const appleProvider = state.musicProviders?.apple_music || {};
-    if (!appleProvider.connected) return;
-    const last = getAppleSyncTimestamp();
-    if (last) {
-      const lastMs = Date.parse(last);
-      if (Number.isFinite(lastMs)) {
-        const ageMs = Date.now() - lastMs;
-        if (ageMs < 30 * 60 * 1000) return;
-      }
-    }
-    await syncAppleCatalog();
   }
 
   function stopSeratoRelay() {
@@ -4011,7 +3768,6 @@
       state.searchDebounce = setTimeout(runUnifiedSearch, 280);
     });
     on(el.searchSubmitBtn, "click", runUnifiedSearch);
-    on(el.appleSyncBtn, "click", syncAppleCatalog);
     on(el.nowRecommendations, "click", (event) => {
       const card = event.target.closest("[data-now-recommend-track]");
       if (!card) return;
@@ -4145,25 +3901,6 @@
       removeExternalListItem(btn.getAttribute("data-remove-list-item"));
     });
 
-    const providerDelegate = async (event) => {
-      const connectBtn = event.target.closest("[data-provider-connect]");
-      if (connectBtn) {
-        await startMusicProviderConnect(connectBtn.getAttribute("data-provider-connect"));
-        return;
-      }
-      const syncBtn = event.target.closest("[data-provider-sync]");
-      if (syncBtn) {
-        await syncMusicProvider(syncBtn.getAttribute("data-provider-sync"));
-        return;
-      }
-      const disconnectBtn = event.target.closest("[data-provider-disconnect]");
-      if (disconnectBtn) {
-        await disconnectMusicProvider(disconnectBtn.getAttribute("data-provider-disconnect"));
-      }
-    };
-    on(el.musicProvidersPanel, "click", providerDelegate);
-    on(el.profileMusicProviders, "click", providerDelegate);
-
     on(el.mayaChatTrigger, "click", () => toggleMayaChat());
     on(el.mayaChatClose, "click", () => toggleMayaChat(false));
     on(el.mayaChatForm, "submit", async (event) => {
@@ -4265,7 +4002,6 @@
         navigateTo("now-playing");
         try {
           await loadAuthorizedData();
-          await maybeAutoSyncAppleCatalog();
           startPollers();
         } catch (error) {
           console.error(error);
