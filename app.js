@@ -3,6 +3,8 @@
   const LAST_LOGIN_ID_KEY = "maya_mixa_last_login_id";
   const API_BASE_KEY = "maya_mixa_api_base";
   const APPLE_SYNC_KEY = "maya_mixa_apple_sync_at";
+  const SERATO_HISTORY_PATH_KEY = "maya_mixa_serato_history_path";
+  const LIBRARY_SCAN_PATH_KEY = "maya_mixa_library_scan_path";
   const DEFAULT_CLOUD_API_BASE = "https://maya-mixa-cloud.onrender.com";
   const BOOT_LOADER_MIN_MS = 950;
   const BOOT_LOADER_MAX_MS = 7000;
@@ -33,6 +35,8 @@
     typeof window !== "undefined" && window.mayaDesktop && window.mayaDesktop.library ? window.mayaDesktop.library : null;
   const desktopUpdatesApi =
     typeof window !== "undefined" && window.mayaDesktop && window.mayaDesktop.updates ? window.mayaDesktop.updates : null;
+  const desktopAuthApi =
+    typeof window !== "undefined" && window.mayaDesktop && window.mayaDesktop.auth ? window.mayaDesktop.auth : null;
 
   const state = {
     activeScreen: "now-playing",
@@ -83,6 +87,7 @@
     },
     desktopLibrary: { available: Boolean(desktopLibraryApi), roots: [], scanned: 0, truncated: false, lastError: "" },
     desktopUpdate: { checkedAt: null, currentVersion: "", latestVersion: "", updateAvailable: false, releaseUrl: "", error: "" },
+    desktopUpdateCheckDueAt: 0,
     transitionFilters: { a: "", b: "" },
     sessionBuilder: { selectedTrackIds: [], analyses: [] },
 
@@ -114,6 +119,7 @@
     bridgeStatusText: document.getElementById("bridgeStatusText"),
     socketStatus: document.getElementById("socketStatus"),
     socketStatusText: document.getElementById("socketStatusText"),
+    updateDesktopBtn: document.getElementById("updateDesktopBtn"),
 
     nowTrackName: document.getElementById("nowTrackName"),
     nowTrackArtist: document.getElementById("nowTrackArtist"),
@@ -172,6 +178,8 @@
 
     libraryPathInput: document.getElementById("libraryPathInput"),
     scanLibraryBtn: document.getElementById("scanLibraryBtn"),
+    musicDropZone: document.getElementById("musicDropZone"),
+    musicDropStatus: document.getElementById("musicDropStatus"),
     scanStatus: document.getElementById("scanStatus"),
     musicProvidersPanel: document.getElementById("musicProvidersPanel"),
     profileMusicProviders: document.getElementById("profileMusicProviders"),
@@ -211,6 +219,8 @@
     wsUrlInput: document.getElementById("wsUrlInput"),
     historyPathInput: document.getElementById("historyPathInput"),
     feedPathInput: document.getElementById("feedPathInput"),
+    seratoDropZone: document.getElementById("seratoDropZone"),
+    seratoDropStatus: document.getElementById("seratoDropStatus"),
     wsConnectBtn: document.getElementById("wsConnectBtn"),
     wsDisconnectBtn: document.getElementById("wsDisconnectBtn"),
     wsStatusDetail: document.getElementById("wsStatusDetail"),
@@ -446,6 +456,9 @@
     } catch (_) {
       // Ignore storage issues.
     }
+    if (desktopAuthApi?.save) {
+      void desktopAuthApi.save({ loginId: normalized }).catch(() => {});
+    }
   }
 
   function isPasswordlessMode() {
@@ -677,6 +690,9 @@
     } catch (_) {
       // Ignore storage issues.
     }
+    if (desktopAuthApi?.save) {
+      void desktopAuthApi.save({ token: state.auth.token || "" }).catch(() => {});
+    }
   }
 
   function setCurrentUser(user) {
@@ -726,6 +742,7 @@
     };
     state.desktopLibrary = { available: Boolean(desktopLibraryApi), roots: [], scanned: 0, truncated: false, lastError: "" };
     state.desktopUpdate = { checkedAt: null, currentVersion: "", latestVersion: "", updateAvailable: false, releaseUrl: "", error: "" };
+    state.desktopUpdateCheckDueAt = 0;
     renderMusicProvidersPanels();
   }
 
@@ -825,6 +842,240 @@
   function on(node, eventName, handler) {
     if (!node) return;
     node.addEventListener(eventName, handler);
+  }
+
+  const AUDIO_FILE_EXTENSIONS = new Set([".mp3", ".wav", ".aiff", ".aif", ".flac", ".m4a", ".aac", ".ogg", ".opus"]);
+
+  function persistPathPreference(storageKey, value) {
+    try {
+      const normalized = String(value || "").trim();
+      if (normalized) {
+        localStorage.setItem(storageKey, normalized);
+      } else {
+        localStorage.removeItem(storageKey);
+      }
+    } catch (_) {
+      // Ignore storage issues.
+    }
+  }
+
+  function readPathPreference(storageKey) {
+    try {
+      return String(localStorage.getItem(storageKey) || "").trim();
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function restorePathPreferences() {
+    if (el.historyPathInput && !String(el.historyPathInput.value || "").trim()) {
+      const savedHistory = readPathPreference(SERATO_HISTORY_PATH_KEY);
+      if (savedHistory) el.historyPathInput.value = savedHistory;
+    }
+    if (el.libraryPathInput && !String(el.libraryPathInput.value || "").trim()) {
+      const savedLibrary = readPathPreference(LIBRARY_SCAN_PATH_KEY);
+      if (savedLibrary) el.libraryPathInput.value = savedLibrary;
+    }
+  }
+
+  function normalizeDroppedPath(raw) {
+    let value = String(raw || "").trim();
+    if (!value) return "";
+    if (value.startsWith("file://")) {
+      value = value.replace(/^file:\/\//i, "");
+      try {
+        value = decodeURIComponent(value);
+      } catch (_) {
+        // Keep raw value if decode fails.
+      }
+      if (/^\/[a-zA-Z]:\//.test(value)) value = value.slice(1);
+    }
+    return value;
+  }
+
+  function looksLikeAbsolutePath(raw) {
+    const value = normalizeDroppedPath(raw);
+    return value.startsWith("/") || value.startsWith("~/") || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\");
+  }
+
+  function pathDirname(raw) {
+    const value = normalizeDroppedPath(raw).replace(/[\\/]+$/, "");
+    if (!value) return "";
+    const slash = Math.max(value.lastIndexOf("/"), value.lastIndexOf("\\"));
+    if (slash < 0) return "";
+    return value.slice(0, slash);
+  }
+
+  function pathExtension(raw) {
+    const value = normalizeDroppedPath(raw);
+    if (!value) return "";
+    const basename = value.split(/[\\/]/).pop() || "";
+    const dot = basename.lastIndexOf(".");
+    if (dot <= 0) return "";
+    return basename.slice(dot).toLowerCase();
+  }
+
+  function looksLikeAudioPath(raw) {
+    return AUDIO_FILE_EXTENSIONS.has(pathExtension(raw));
+  }
+
+  function looksLikeSeratoAppPath(raw) {
+    const value = normalizeDroppedPath(raw).toLowerCase();
+    if (!value) return false;
+    return (
+      (value.includes("serato") && value.endsWith(".app")) ||
+      value.endsWith("serato dj pro.exe") ||
+      value.endsWith("serato.exe")
+    );
+  }
+
+  function looksLikeMusicAppPath(raw) {
+    const value = normalizeDroppedPath(raw).toLowerCase();
+    if (!value) return false;
+    if (!(value.endsWith(".app") || value.endsWith(".exe"))) return false;
+    return (
+      value.includes("music.app") ||
+      value.includes("apple music") ||
+      value.endsWith("itunes.app") ||
+      value.endsWith("itunes.exe") ||
+      value.includes("spotify") ||
+      value.includes("deezer")
+    );
+  }
+
+  function deriveMusicLibraryPath(raw) {
+    const value = normalizeDroppedPath(raw);
+    if (!value) return "";
+    if (looksLikeAudioPath(value)) return pathDirname(value) || value;
+
+    if (looksLikeMusicAppPath(value)) {
+      const normalized = value.replace(/\\/g, "/");
+      const unixMatch = normalized.match(/^\/Users\/([^/]+)/);
+      if (unixMatch) return `/Users/${unixMatch[1]}/Music`;
+      const winMatch = normalized.match(/^([a-zA-Z]:)\/Users\/([^/]+)/);
+      if (winMatch) return `${winMatch[1]}\\Users\\${winMatch[2]}\\Music`;
+      return "~/Music";
+    }
+    return value;
+  }
+
+  function deriveSeratoHistoryPath(raw) {
+    const value = normalizeDroppedPath(raw);
+    if (!value) return "";
+    const normalized = value.replace(/\\/g, "/");
+    const lower = normalized.toLowerCase();
+    const sessionsToken = "/_serato_/history/sessions";
+    const historyToken = "/_serato_/history";
+    const sessionsIdx = lower.indexOf(sessionsToken);
+    if (sessionsIdx >= 0) return normalized.slice(0, sessionsIdx + sessionsToken.length);
+    const historyIdx = lower.indexOf(historyToken);
+    if (historyIdx >= 0) return `${normalized.slice(0, historyIdx + historyToken.length)}/Sessions`;
+
+    if (looksLikeSeratoAppPath(normalized)) {
+      const unixMatch = normalized.match(/^\/Users\/([^/]+)/);
+      if (unixMatch) return `/Users/${unixMatch[1]}/Music/_Serato_/History/Sessions`;
+      const winMatch = normalized.match(/^([a-zA-Z]:)\/Users\/([^/]+)/);
+      if (winMatch) return `${winMatch[1]}\\Users\\${winMatch[2]}\\Music\\_Serato_\\History\\Sessions`;
+      return "~/Music/_Serato_/History/Sessions";
+    }
+    return "";
+  }
+
+  function collectDroppedPaths(event) {
+    const dt = event?.dataTransfer;
+    if (!dt) return [];
+    const output = [];
+
+    const files = Array.from(dt.files || []);
+    files.forEach((file) => {
+      const rawPath = normalizeDroppedPath(file?.path || file?.name || "");
+      if (rawPath) output.push(rawPath);
+    });
+
+    const uriList = String(dt.getData("text/uri-list") || "");
+    uriList
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .forEach((line) => {
+        const maybePath = normalizeDroppedPath(line);
+        if (maybePath) output.push(maybePath);
+      });
+
+    const plain = normalizeDroppedPath(dt.getData("text/plain") || "");
+    if (plain) output.push(plain);
+
+    return output.filter((item, idx, arr) => arr.indexOf(item) === idx);
+  }
+
+  function updateDropStatus(node, message) {
+    if (!node) return;
+    node.textContent = message;
+  }
+
+  function applyDroppedMusicPath(pathValue) {
+    const normalized = normalizeDroppedPath(pathValue);
+    if (!normalized || !el.libraryPathInput) return false;
+    if (!looksLikeAbsolutePath(normalized)) return false;
+    const chosen = deriveMusicLibraryPath(normalized);
+    if (!chosen) return false;
+    el.libraryPathInput.value = chosen;
+    persistPathPreference(LIBRARY_SCAN_PATH_KEY, chosen);
+    updateDropStatus(el.musicDropStatus, chosen);
+    if (el.scanStatus) el.scanStatus.textContent = "Chemin musique détecté. Clique « Analyser audio » pour importer.";
+    showToast("Chemin musique détecté");
+    return true;
+  }
+
+  function applyDroppedSeratoPath(pathValue) {
+    const normalized = normalizeDroppedPath(pathValue);
+    if (!normalized) return false;
+    if (!looksLikeAbsolutePath(normalized)) return false;
+    const historyPath = deriveSeratoHistoryPath(normalized);
+    if (!historyPath || !el.historyPathInput) return false;
+
+    el.historyPathInput.value = historyPath;
+    persistPathPreference(SERATO_HISTORY_PATH_KEY, historyPath);
+    updateDropStatus(el.seratoDropStatus, historyPath);
+
+    if (!state.desktopSerato.available && el.seratoModeSelect && el.seratoModeSelect.value === "relay_websocket") {
+      el.seratoModeSelect.value = "history";
+    }
+    if (el.wsStatusDetail) el.wsStatusDetail.textContent = "Chemin Serato détecté. Clique « Connecter Serato ».";
+    showToast("Chemin Serato détecté");
+    return true;
+  }
+
+  function bindDropTarget(node, onDropPaths) {
+    if (!node) return;
+    const prevent = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    const activate = (active) => node.classList.toggle("drag-over", Boolean(active));
+
+    ["dragenter", "dragover"].forEach((name) =>
+      node.addEventListener(name, (event) => {
+        prevent(event);
+        activate(true);
+      })
+    );
+    ["dragleave", "dragend"].forEach((name) =>
+      node.addEventListener(name, (event) => {
+        prevent(event);
+        activate(false);
+      })
+    );
+    node.addEventListener("drop", (event) => {
+      prevent(event);
+      activate(false);
+      const paths = collectDroppedPaths(event);
+      if (!paths.length) {
+        showToast("Aucun chemin récupéré. Utilise l'app desktop Maya Mixa pour drag & drop.");
+        return;
+      }
+      onDropPaths(paths);
+    });
   }
 
   function clamp(value, low, high) {
@@ -1190,7 +1441,13 @@
         context: buildMayaContext(),
       });
       const answer = payload?.reply?.text || "Réponse IA indisponible.";
-      appendMayaChatMessage("ai", answer);
+      const source = String(payload?.reply?.source || "").trim();
+      const internetConnected = Boolean(payload?.reply?.internetConnected);
+      const providers = Number(payload?.reply?.internetProviderCount || 0);
+      const sourceLine = source ? `[source: ${source}]` : "";
+      const internetLine = internetConnected ? `[internet: ${providers} sources]` : "[internet: offline]";
+      const decorated = `${answer}\n\n${[sourceLine, internetLine].filter(Boolean).join(" ")}`.trim();
+      appendMayaChatMessage("ai", decorated);
     } catch (error) {
       appendMayaChatMessage("ai", `Erreur IA: ${humanizeError(error)}`);
     } finally {
@@ -1263,15 +1520,38 @@
       updateApiConfigUi();
       return false;
     }
+    let desktopAuthState = { token: "", loginId: "" };
+    if (desktopAuthApi?.load) {
+      try {
+        const loaded = await desktopAuthApi.load();
+        if (loaded && typeof loaded === "object") {
+          desktopAuthState = {
+            token: String(loaded.token || "").trim(),
+            loginId: String(loaded.loginId || "")
+              .trim()
+              .toLowerCase(),
+          };
+        }
+      } catch (_) {
+        desktopAuthState = { token: "", loginId: "" };
+      }
+    }
     let storedToken = "";
     try {
       storedToken = localStorage.getItem(AUTH_TOKEN_KEY) || "";
     } catch (_) {
       storedToken = "";
     }
+    if (!storedToken && desktopAuthState.token) {
+      storedToken = desktopAuthState.token;
+    }
     persistAuthToken(storedToken);
 
-    const rememberedLoginId = getRememberedLoginId();
+    let rememberedLoginId = getRememberedLoginId();
+    if (!rememberedLoginId && desktopAuthState.loginId) {
+      rememberedLoginId = desktopAuthState.loginId;
+      rememberLoginId(rememberedLoginId);
+    }
     if (el.loginEmailInput && !el.loginEmailInput.value.trim() && rememberedLoginId) {
       el.loginEmailInput.value = rememberedLoginId;
     }
@@ -1312,6 +1592,9 @@
     } catch (_) {
       const restored = await tryPasswordlessAutoLogin();
       if (restored) return true;
+      if (desktopAuthApi?.save) {
+        void desktopAuthApi.save({ token: "" }).catch(() => {});
+      }
       forceLogoutUi("Session expirée. Reconnecte-toi.");
       return false;
     }
@@ -1480,7 +1763,32 @@
       startPollers();
       showToast("Compte DJ créé");
     } catch (error) {
-      setAuthFeedback(humanizeError(error, "Inscription impossible. Vérifie que l'ID DJ est unique."), "error");
+      const message = humanizeError(error, "Inscription impossible. Vérifie que l'ID DJ est unique.");
+      const alreadyExists = /already registered|already exists|déjà|existe|409/i.test(String(message || ""));
+      if (isPasswordlessMode() && alreadyExists) {
+        try {
+          const loginPayload = await api(
+            "POST",
+            "/api/auth/login",
+            { email, loginId: email, identifier: email, password: "" },
+            { auth: false }
+          );
+          persistAuthToken(loginPayload.token || "");
+          rememberLoginId(email);
+          setCurrentUser(loginPayload.user || null);
+          lockAppUi(false);
+          setAuthFeedback("Compte existant détecté. Session restaurée.", "success");
+          resetSensitiveInputs();
+          navigateTo("now-playing");
+          await loadAuthorizedData();
+          startPollers();
+          showToast("Profil DJ restauré");
+          return;
+        } catch (_) {
+          // Fallback to normal error below.
+        }
+      }
+      setAuthFeedback(message, "error");
     } finally {
       el.registerSubmitBtn.disabled = false;
     }
@@ -1705,6 +2013,14 @@
       const payload = await desktopSeratoApi.status();
       if (payload && typeof payload === "object") {
         state.desktopSerato = { ...state.desktopSerato, ...payload, available: true };
+        if (el.historyPathInput && payload.historyPath) {
+          const current = String(el.historyPathInput.value || "").trim();
+          if (!current) el.historyPathInput.value = String(payload.historyPath || "");
+        }
+        if (payload.historyPath) {
+          persistPathPreference(SERATO_HISTORY_PATH_KEY, String(payload.historyPath || ""));
+          updateDropStatus(el.seratoDropStatus, String(payload.historyPath || ""));
+        }
       }
       return state.desktopSerato;
     } catch (error) {
@@ -1724,11 +2040,13 @@
     const apiBase = String(runtimeConfig.apiBase || "").trim();
     const token = String(state.auth.token || "").trim();
     if (!apiBase || !token) return false;
+    const preferredHistoryPath = String(el.historyPathInput?.value || "").trim();
     try {
       const payload = await desktopSeratoApi.start({
         apiBase,
         token,
         force: Boolean(force),
+        historyPath: preferredHistoryPath,
       });
       if (payload && typeof payload === "object") {
         state.desktopSerato = { ...state.desktopSerato, ...payload, available: true };
@@ -1810,8 +2128,26 @@
         error: humanizeError(error),
       };
     }
+    state.desktopUpdateCheckDueAt = Date.now() + 1000 * 60 * 30;
     updateTopStatus();
     return state.desktopUpdate;
+  }
+
+  async function openDesktopUpdate() {
+    const current = state.desktopUpdate || {};
+    let target = String(current.releaseUrl || "").trim();
+    let available = Boolean(current.updateAvailable && target);
+    if (!available) {
+      const latest = await checkDesktopUpdates(false);
+      target = String(latest?.releaseUrl || "").trim();
+      available = Boolean(latest?.updateAvailable && target);
+    }
+    if (!available) {
+      showToast("Aucune mise à jour desktop disponible.");
+      return;
+    }
+    window.open(target, "_blank", "noopener");
+    showToast("Page de mise à jour ouverte.");
   }
 
   function stopPollers() {
@@ -1842,6 +2178,9 @@
       await refreshHistory();
       if (state.activeScreen === "account") {
         await refreshAccountDashboard();
+      }
+      if (state.desktopSerato.available && Date.now() >= Number(state.desktopUpdateCheckDueAt || 0)) {
+        await checkDesktopUpdates(true);
       }
     }, 1300);
     state.recommendationsPoller = setInterval(async () => {
@@ -3008,7 +3347,14 @@
         ? "OpenAI connecté"
         : "OpenAI indisponible"
       : "OpenAI optionnel";
-    const internetText = state.ai?.internetEnrichment?.active ? "internet metadata actif" : "internet metadata off";
+    const internetInfo = state.ai?.internetEnrichment || {};
+    const internetText = internetInfo.active
+      ? internetInfo.connected === true
+        ? `internet metadata connecté (${Number(internetInfo.providerCount || 0)} sources)`
+        : internetInfo.connected === false
+        ? "internet metadata indisponible"
+        : "internet metadata en attente"
+      : "internet metadata off";
     const aiText = `IA runtime actif • moteur local ${state.ai.localModelActive ? "actif" : "off"} • ${openaiText} • ${internetText}`;
     const aiStatus = state.ai.localModelActive ? "connected" : "disconnected";
     setStatusPill(el.socketStatus, el.socketStatusText, aiStatus, "AI", aiText);
@@ -3032,6 +3378,21 @@
         : ` • version à jour (${state.desktopUpdate.currentVersion || "n/a"})`
       : "";
     el.wsStatusDetail.textContent = `${wsLine}${updateInfo}`;
+
+    if (el.updateDesktopBtn) {
+      const desktopUpdateAvailable = Boolean(desktopUpdatesApi);
+      el.updateDesktopBtn.classList.toggle("hidden", !desktopUpdateAvailable);
+      const hasUpdate = Boolean(state.desktopUpdate?.updateAvailable && state.desktopUpdate?.releaseUrl);
+      if (hasUpdate) {
+        el.updateDesktopBtn.textContent = `Update v${state.desktopUpdate.latestVersion || "new"}`;
+        el.updateDesktopBtn.classList.add("has-update");
+        el.updateDesktopBtn.title = "Ouvrir la page de téléchargement de la nouvelle version";
+      } else {
+        el.updateDesktopBtn.textContent = "Vérifier update";
+        el.updateDesktopBtn.classList.remove("has-update");
+        el.updateDesktopBtn.title = "Vérifier les mises à jour desktop";
+      }
+    }
   }
 
   async function refreshRecommendations() {
@@ -3130,7 +3491,7 @@
 
   async function refreshAiStatus() {
     try {
-      state.ai = await api("GET", "/api/ai/status?test_remote=true");
+      state.ai = await api("GET", "/api/ai/status?test_remote=true", undefined, { auth: false });
       updateTopStatus();
     } catch (error) {
       state.ai = {
@@ -3146,6 +3507,7 @@
 
   async function scanLibrary() {
     const path = (el.libraryPathInput.value || "").trim();
+    if (path) persistPathPreference(LIBRARY_SCAN_PATH_KEY, path);
     el.scanStatus.innerHTML = `${typingIndicatorMarkup("Maya scanne et analyse les morceaux...")}`;
     try {
       if (desktopLibraryApi) {
@@ -3381,6 +3743,8 @@
   }
 
   async function connectBridge() {
+    const preferredHistoryPath = String(el.historyPathInput?.value || "").trim();
+    if (preferredHistoryPath) persistPathPreference(SERATO_HISTORY_PATH_KEY, preferredHistoryPath);
     if (state.desktopSerato.available) {
       try {
         const started = await startDesktopSeratoSync(true);
@@ -3405,7 +3769,7 @@
     const payload = {
       mode: useRelay ? "push" : selectedMode,
       ws_url: useRelay ? relayUrl : String(el.wsUrlInput?.value || "").trim(),
-      history_path: String(el.historyPathInput?.value || "").trim(),
+      history_path: preferredHistoryPath,
       feed_path: String(el.feedPathInput?.value || "").trim(),
     };
 
@@ -3563,6 +3927,41 @@
 
   function bindEvents() {
     el.navItems.forEach((item) => on(item, "click", () => navigateTo(item.dataset.screen)));
+    on(el.updateDesktopBtn, "click", openDesktopUpdate);
+    restorePathPreferences();
+    if (el.historyPathInput?.value) updateDropStatus(el.seratoDropStatus, String(el.historyPathInput.value || ""));
+    if (el.libraryPathInput?.value) updateDropStatus(el.musicDropStatus, String(el.libraryPathInput.value || ""));
+
+    bindDropTarget(el.seratoDropZone, (paths) => {
+      const seratoCandidate =
+        paths.find((path) => Boolean(deriveSeratoHistoryPath(path))) || paths.find((path) => looksLikeSeratoAppPath(path)) || "";
+      if (!seratoCandidate || !applyDroppedSeratoPath(seratoCandidate)) {
+        showToast("Drop Serato invalide. Glisse Serato DJ Pro.app ou un dossier _Serato_.");
+      }
+    });
+
+    bindDropTarget(el.musicDropZone, (paths) => {
+      const musicCandidate =
+        paths.find((path) => looksLikeAudioPath(path)) ||
+        paths.find((path) => looksLikeMusicAppPath(path)) ||
+        paths.find((path) => !deriveSeratoHistoryPath(path) && !looksLikeSeratoAppPath(path) && !String(path).toLowerCase().endsWith(".app")) ||
+        "";
+      if (!musicCandidate || !applyDroppedMusicPath(musicCandidate)) {
+        showToast("Drop musique invalide. Glisse dossier/fichier audio ou app musique.");
+      }
+    });
+
+    on(el.historyPathInput, "change", () => {
+      const value = String(el.historyPathInput?.value || "").trim();
+      persistPathPreference(SERATO_HISTORY_PATH_KEY, value);
+      if (value) updateDropStatus(el.seratoDropStatus, value);
+    });
+
+    on(el.libraryPathInput, "change", () => {
+      const value = String(el.libraryPathInput?.value || "").trim();
+      persistPathPreference(LIBRARY_SCAN_PATH_KEY, value);
+      if (value) updateDropStatus(el.musicDropStatus, value);
+    });
 
     on(el.mobileMenuBtn, "click", () => el.sidebar?.classList.toggle("open"));
 
@@ -3844,6 +4243,11 @@
       setSearchTab("local");
       await refreshAuthSettings();
       await refreshOAuthProviders();
+      if (!requiresConfiguredApiBase() || hasApiBaseConfigured()) {
+        await refreshAiStatus();
+      } else {
+        updateTopStatus();
+      }
       setAuthTab("login");
       bootstrapOAuthFromUrl();
       bootstrapMusicConnectFromUrl();

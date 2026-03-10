@@ -33,8 +33,6 @@ from pydantic import BaseModel, Field
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "maya.db"
 INDEX_PATH = BASE_DIR / "index.html"
 APP_JS_PATH = BASE_DIR / "app.js"
 ASSETS_DIR = BASE_DIR / "assets"
@@ -43,6 +41,35 @@ AUTH_SESSION_TTL_SECONDS = int(os.getenv("MAYA_AUTH_TTL_SECONDS", str(60 * 60 * 
 PASSWORD_PBKDF2_ITERATIONS = 210000
 PASSWORD_RESET_TTL_SECONDS = int(os.getenv("MAYA_PASSWORD_RESET_TTL_SECONDS", str(60 * 30)))
 APP_ENV = os.getenv("MAYA_ENV", "development").strip().lower()
+MAYA_DB_PATH_ENV = os.getenv("MAYA_DB_PATH", "").strip()
+
+
+def resolve_db_path() -> Path:
+    candidates: List[Path] = []
+    if MAYA_DB_PATH_ENV:
+        candidates.append(Path(MAYA_DB_PATH_ENV).expanduser())
+    if APP_ENV == "production":
+        candidates.append(Path("/var/data/maya.db"))
+        candidates.append(Path("/app/data/maya.db"))
+    candidates.append(BASE_DIR / "data" / "maya.db")
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            with resolved.open("a", encoding="utf-8"):
+                pass
+            return resolved
+        except Exception:
+            continue
+
+    fallback = (BASE_DIR / "data" / "maya.db").resolve()
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+DB_PATH = resolve_db_path()
+DATA_DIR = DB_PATH.parent
 ALLOW_DEBUG_RESET_TOKEN = (
     os.getenv("MAYA_ALLOW_DEBUG_RESET_TOKEN", "false").strip().lower() in {"1", "true", "yes", "on"}
     and APP_ENV != "production"
@@ -1986,14 +2013,13 @@ class AIService:
         current = ctx.get("currentTrack") or {}
         session = ctx.get("session") or {}
         recs = ctx.get("recommendations") or []
-        local_response = [
-            "🐝 Maya MixIA active.",
-            f"Question: {question}",
-        ]
+        internet = ctx.get("internetInsights") or {}
+        transition_candidates = ctx.get("transitionCandidates") or []
+        local_response = ["🐝 Maya MixIA active (mode data réel).", f"Question: {question}"]
         if isinstance(current, dict) and (current.get("title") or current.get("artist")):
             local_response.append(
                 f"Track en cours: {current.get('artist', 'Unknown')} - {current.get('title', 'Unknown')} "
-                f"({current.get('bpm', '--')} BPM, {current.get('camelot_key') or current.get('musical_key') or '-'})"
+                f"({current.get('bpm', '--')} BPM, {current.get('camelot_key') or current.get('musical_key') or '-'}, énergie {current.get('energy', '--')})"
             )
         if isinstance(session, dict) and session.get("active"):
             local_response.append("Session live active: je priorise des transitions stables et lisibles.")
@@ -2005,7 +2031,37 @@ class AIService:
                     f"Suggestion immédiate: {track.get('artist', 'Unknown')} - {track.get('title', 'Unknown')} "
                     f"({head.get('compatibility', '--')}%)."
                 )
-        local_response.append("Action conseillée: vérifie la clé + cale l’entrée sur 16 ou 32 mesures.")
+        if isinstance(transition_candidates, list) and transition_candidates:
+            top = transition_candidates[0]
+            local_response.append(
+                f"Top transition locale: {top.get('trackB', {}).get('artist', 'Unknown')} - "
+                f"{top.get('trackB', {}).get('title', 'Unknown')} "
+                f"({top.get('compatibility', '--')}%, {top.get('difficulty', '-')})."
+            )
+            breakdown = top.get("breakdown") or {}
+            if breakdown:
+                local_response.append(
+                    "Raisons chiffrées: "
+                    f"BPM {breakdown.get('bpm', '--')} • "
+                    f"Clé {breakdown.get('key', '--')} • "
+                    f"Énergie {breakdown.get('energy', '--')} • "
+                    f"Timbre {breakdown.get('timbre', '--')}."
+                )
+        if isinstance(internet, dict):
+            external = internet.get("results") or []
+            if internet.get("connected"):
+                if external:
+                    first = external[0]
+                    local_response.append(
+                        f"Internet OK ({internet.get('providerCount', 0)} sources). "
+                        f"Résultat externe: {first.get('artist', 'Unknown')} - {first.get('title', 'Unknown')} "
+                        f"[{first.get('source', 'source')}]."
+                    )
+                else:
+                    local_response.append("Internet OK mais aucun résultat externe pertinent pour cette requête.")
+            elif internet.get("message"):
+                local_response.append(f"Internet metadata indisponible: {internet.get('message')}")
+        local_response.append("Action conseillée: vérifie la clé, puis cale l’entrée sur 16 ou 32 mesures.")
 
         if not self.remote_enabled:
             return {"text": "\n".join(local_response), "source": "local"}
@@ -2017,8 +2073,14 @@ class AIService:
                     {
                         "role": "system",
                         "content": (
-                            "Tu es Maya MixIA, copilote DJ francophone. Réponds en style coaching live: "
-                            "court, actionnable, orienté mix réel. Structure: diagnostic, action, timing."
+                            "Tu es Maya MixIA, copilote DJ francophone. "
+                            "Réponds avec des données concrètes du contexte, jamais de phrase vague. "
+                            "Format obligatoire: "
+                            "1) Diagnostic (données) "
+                            "2) Action immédiate "
+                            "3) Timing précis. "
+                            "Inclure au moins 3 éléments factuels: BPM, clé, compatibilité, morceaux, sources internet. "
+                            "Si une donnée manque, indique explicitement 'donnée absente'."
                         ),
                     },
                     {
@@ -2031,7 +2093,19 @@ class AIService:
             )
             text = (response.output_text or "").strip()
             if text:
-                return {"text": text, "source": "openai"}
+                has_numeric_signal = bool(re.search(r"\d", text))
+                known_titles = []
+                if isinstance(current, dict) and current.get("title"):
+                    known_titles.append(str(current.get("title")).lower())
+                if isinstance(transition_candidates, list):
+                    for item in transition_candidates[:3]:
+                        track_b = item.get("trackB") or {}
+                        title = str(track_b.get("title") or "").strip().lower()
+                        if title:
+                            known_titles.append(title)
+                has_title_signal = any(title and title in text.lower() for title in known_titles)
+                if has_numeric_signal or has_title_signal:
+                    return {"text": text, "source": "openai"}
         except Exception:
             pass
         return {"text": "\n".join(local_response), "source": "local"}
@@ -2682,7 +2756,12 @@ def _require_feature_vector(track: Dict[str, Any], label: str) -> np.ndarray:
     return np.array(values, dtype=np.float64)
 
 
-def analyze_transition(track_a: Dict[str, Any], track_b: Dict[str, Any], ai_service: AIService) -> Dict[str, Any]:
+def analyze_transition(
+    track_a: Dict[str, Any],
+    track_b: Dict[str, Any],
+    ai_service: AIService,
+    allow_remote_tips: bool = True,
+) -> Dict[str, Any]:
     bpm_a = _require_positive_float(track_a.get("bpm"), "trackA bpm")
     bpm_b = _require_positive_float(track_b.get("bpm"), "trackB bpm")
     duration_a = _require_positive_float(track_a.get("duration"), "trackA duration")
@@ -2748,10 +2827,11 @@ def analyze_transition(track_a: Dict[str, Any], track_b: Dict[str, Any], ai_serv
         },
     }
 
-    remote_tips = ai_service.transition_tips(track_a, track_b, result)
-    if remote_tips and remote_tips != coach:
-        result["coach"] = remote_tips
-        result["ai"]["openaiUsed"] = True
+    if allow_remote_tips:
+        remote_tips = ai_service.transition_tips(track_a, track_b, result)
+        if remote_tips and remote_tips != coach:
+            result["coach"] = remote_tips
+            result["ai"]["openaiUsed"] = True
     return result
 
 
@@ -3190,14 +3270,63 @@ class SeratoBridge:
         return self.get_state()
 
     def _update_deck(self, deck: str, incoming: Dict[str, Any], source: str) -> None:
-        track_path = str(incoming.get("path") or incoming.get("file_path") or "").strip()
-        title = str(incoming.get("title") or incoming.get("name") or "").strip()
-        artist = str(incoming.get("artist") or "Unknown Artist").strip()
-        bpm = incoming.get("bpm")
-        key = incoming.get("key")
-        position = float(incoming.get("position") or 0.0)
+        def _safe_float(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _canon(value: Any) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+        raw_track_id = incoming.get("track_id") or incoming.get("trackId") or incoming.get("id")
+        incoming_track_id: Optional[int] = None
+        try:
+            parsed_id = int(raw_track_id)
+            if parsed_id > 0:
+                incoming_track_id = parsed_id
+        except (TypeError, ValueError):
+            incoming_track_id = None
+
+        track_path = str(
+            incoming.get("path")
+            or incoming.get("file_path")
+            or incoming.get("filePath")
+            or incoming.get("filepath")
+            or ""
+        ).strip()
+        title = str(
+            incoming.get("title")
+            or incoming.get("name")
+            or incoming.get("track_name")
+            or incoming.get("trackTitle")
+            or incoming.get("song")
+            or ""
+        ).strip()
+        artist = str(
+            incoming.get("artist")
+            or incoming.get("artist_name")
+            or incoming.get("track_artist")
+            or ""
+        ).strip() or "Unknown Artist"
+        bpm = incoming.get("bpm", incoming.get("tempo"))
+        key = incoming.get("key") or incoming.get("camelot_key") or incoming.get("musical_key")
+        position = _safe_float(
+            incoming.get("position", incoming.get("playhead", incoming.get("elapsed", 0.0))),
+            default=0.0,
+        )
 
         track_obj: Optional[Dict[str, Any]] = None
+
+        if incoming_track_id:
+            if self.user_id is not None:
+                track_obj = self.db.get_track(incoming_track_id, user_id=self.user_id)
+            else:
+                track_obj = self.db.get_track(incoming_track_id)
+            if not track_obj:
+                track_obj = self.db.get_track(incoming_track_id)
+            if track_obj and self.user_id is not None:
+                self.db.link_user_track(self.user_id, int(track_obj["id"]))
 
         if track_path:
             if self.user_id is not None:
@@ -3219,6 +3348,37 @@ class SeratoBridge:
                 track_obj = self.db.find_track(title, artist)
             if not track_obj:
                 track_obj = self.db.find_track(title, artist)
+
+            if not track_obj:
+                # Serato/history names are often close but not exact: do a bounded fuzzy fallback.
+                candidates = self.db.list_tracks(query=title, limit=30, user_id=self.user_id) if self.user_id is not None else []
+                if self.user_id is not None and not candidates:
+                    candidates = self.db.list_tracks(query=title, limit=30)
+                elif self.user_id is None:
+                    candidates = self.db.list_tracks(query=title, limit=30)
+
+                in_title = _canon(title)
+                in_artist = _canon("" if artist.lower() == "unknown artist" else artist)
+                best: Optional[Dict[str, Any]] = None
+                best_score = 0
+                for cand in candidates:
+                    cand_title = _canon(cand.get("title"))
+                    cand_artist = _canon(cand.get("artist"))
+                    score = 0
+                    if in_title and cand_title == in_title:
+                        score += 4
+                    elif in_title and (in_title in cand_title or cand_title in in_title):
+                        score += 2
+                    if in_artist:
+                        if cand_artist == in_artist:
+                            score += 2
+                        elif in_artist in cand_artist or cand_artist in in_artist:
+                            score += 1
+                    if score > best_score:
+                        best_score = score
+                        best = cand
+                if best and best_score >= 3:
+                    track_obj = best
             if track_obj and self.user_id is not None:
                 self.db.link_user_track(self.user_id, int(track_obj["id"]))
 
@@ -4424,6 +4584,9 @@ def cloud_status(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, 
     user_tracks_count = len(db.list_tracks(limit=5000, user_id=user_id))
     persistent_target = APP_ENV == "production"
     data_path = str(DB_PATH)
+    db_path_lower = data_path.lower()
+    likely_persistent_path = db_path_lower.startswith("/var/data/") or db_path_lower.startswith("/app/data/")
+    db_path_overridden = bool(MAYA_DB_PATH_ENV)
     cloud_ready = bool(DB_PATH.exists())
     db_size_bytes = int(DB_PATH.stat().st_size) if DB_PATH.exists() else 0
     db_writable = False
@@ -4440,6 +4603,9 @@ def cloud_status(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, 
             "dbWritable": db_writable,
             "dbSizeBytes": db_size_bytes,
             "persistentTarget": persistent_target,
+            "likelyPersistentPath": likely_persistent_path,
+            "dbPathOverridden": db_path_overridden,
+            "dbPathOverrideValue": MAYA_DB_PATH_ENV if MAYA_DB_PATH_ENV else None,
             "renderDiskPathExpected": "/app/data/maya.db",
             "userTracksCount": user_tracks_count,
             "lastUserEventAt": user_events[0]["created_at"] if user_events else None,
@@ -4450,11 +4616,26 @@ def cloud_status(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, 
 @app.get("/api/ai/status")
 def ai_status(test_remote: bool = Query(default=False)) -> Dict[str, Any]:
     status = ai_service.status(test_remote=test_remote)
-    status["internetEnrichment"] = {
+    internet_payload: Dict[str, Any] = {
         "active": True,
         "providers": ["itunes", "deezer", "musicbrainz"],
+        "connected": None,
+        "providerCount": 0,
+        "message": "Internet check not requested",
         "note": "Online metadata enrichment is used for global search and external track intelligence.",
     }
+    if test_remote:
+        probe = music_hub.search("techno", limit=4)
+        provider_count = len({str(row.get("source") or "").strip() for row in probe if row.get("source")})
+        connected = bool(probe)
+        internet_payload.update(
+            {
+                "connected": connected,
+                "providerCount": provider_count,
+                "message": f"Internet metadata {'reachable' if connected else 'unreachable'} (results={len(probe)}).",
+            }
+        )
+    status["internetEnrichment"] = internet_payload
     return status
 
 
@@ -4473,7 +4654,195 @@ def ai_chat(payload: AiChatRequest, user: Dict[str, Any] = Depends(get_current_u
     context.setdefault("session", db.current_session(user_id=user_id) or {})
     context.setdefault("history", db.history_summary(user_id=user_id))
 
+    def compact_track(track: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": int(track.get("id") or 0) if str(track.get("id") or "").strip() else 0,
+            "title": str(track.get("title") or "").strip() or "Unknown Track",
+            "artist": str(track.get("artist") or "").strip() or "Unknown Artist",
+            "bpm": round(float(track.get("bpm") or 0.0), 2) if track.get("bpm") is not None else 0.0,
+            "camelot_key": str(track.get("camelot_key") or "").strip(),
+            "musical_key": str(track.get("musical_key") or "").strip(),
+            "energy": round(float(track.get("energy") or 0.0), 2) if track.get("energy") is not None else 0.0,
+            "note": round(float(track.get("note") or 0.0), 2) if track.get("note") is not None else 0.0,
+            "genre": str(track.get("genre") or "").strip(),
+        }
+
+    def infer_queries() -> List[str]:
+        candidates: List[str] = []
+        raw_search = str(context.get("searchQuery") or "").strip()
+        if raw_search:
+            candidates.append(raw_search)
+
+        selected_external = context.get("selectedExternalTrack") or {}
+        if isinstance(selected_external, dict):
+            ext_artist = str(selected_external.get("artist") or "").strip()
+            ext_title = str(selected_external.get("title") or "").strip()
+            ext_query = " ".join([part for part in [ext_artist, ext_title] if part]).strip()
+            if ext_query:
+                candidates.append(ext_query)
+
+        current_ctx = context.get("currentTrack") or {}
+        if isinstance(current_ctx, dict):
+            cur_artist = str(current_ctx.get("artist") or "").strip()
+            cur_title = str(current_ctx.get("title") or "").strip()
+            cur_query = " ".join([part for part in [cur_artist, cur_title] if part]).strip()
+            if cur_query:
+                candidates.append(cur_query)
+
+        if len(prompt) <= 120:
+            candidates.append(prompt)
+        else:
+            candidates.append(" ".join(prompt.split()[:12]))
+
+        clean: List[str] = []
+        seen = set()
+        for item in candidates:
+            normalized = re.sub(r"\s+", " ", str(item or "").strip())
+            key = normalized.lower()
+            if len(normalized) < 2 or key in seen:
+                continue
+            seen.add(key)
+            clean.append(normalized)
+        return clean[:4]
+
+    def lightweight_transition_preview(track_a: Dict[str, Any], track_b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            bpm_a = float(track_a.get("bpm") or 0.0)
+            bpm_b = float(track_b.get("bpm") or 0.0)
+            energy_a = clamp(float(track_a.get("energy") or track_a.get("note") or 0.0), 1.0, 10.0)
+            energy_b = clamp(float(track_b.get("energy") or track_b.get("note") or 0.0), 1.0, 10.0)
+        except Exception:
+            return None
+        if bpm_a <= 0 or bpm_b <= 0:
+            return None
+        bpm_diff = abs(bpm_a - bpm_b)
+        bpm_score = clamp(1.0 - (bpm_diff / 10.0), 0.2, 1.0)
+        key_score = harmonic_score(str(track_a.get("camelot_key") or ""), str(track_b.get("camelot_key") or ""))
+        energy_score = clamp(1.0 - abs((energy_b - energy_a) - 0.4) / 4.0, 0.25, 1.0)
+        score = clamp(bpm_score * 0.44 + key_score * 0.33 + energy_score * 0.23, 0.05, 1.0)
+        compatibility = round(score * 100, 2)
+        difficulty = "easy" if compatibility >= 86 else "medium" if compatibility >= 72 else "hard"
+        return {
+            "compatibility": compatibility,
+            "difficulty": difficulty,
+            "breakdown": {
+                "bpm": round(bpm_score * 100, 1),
+                "key": round(key_score * 100, 1),
+                "energy": round(energy_score * 100, 1),
+                "timbre": None,
+            },
+            "mixPoints": {},
+        }
+
+    current_track = get_current_local_track(user_id=user_id)
+    if not current_track:
+        current_payload = context.get("currentTrack") or {}
+        if isinstance(current_payload, dict):
+            ctx_track_id = int(current_payload.get("id") or 0) if str(current_payload.get("id") or "").strip() else 0
+            if ctx_track_id:
+                current_track = resolve_track_for_user(ctx_track_id, user_id, allow_link=True)
+            if not current_track:
+                title = str(current_payload.get("title") or "").strip()
+                artist = str(current_payload.get("artist") or "").strip()
+                if title:
+                    current_track = db.find_track(title, artist or "Unknown Artist", user_id=user_id) or db.find_track(
+                        title, artist or "Unknown Artist"
+                    )
+
+    library_rows = db.list_tracks(limit=200, user_id=user_id)
+    if current_track:
+        context["currentTrack"] = compact_track(current_track)
+    elif library_rows:
+        context["currentTrack"] = compact_track(library_rows[0])
+
+    transition_candidates: List[Dict[str, Any]] = []
+    if current_track:
+        for candidate in library_rows:
+            if int(candidate.get("id") or 0) == int(current_track.get("id") or 0):
+                continue
+            try:
+                analysis = analyze_transition(current_track, candidate, ai_service, allow_remote_tips=False)
+            except ValueError:
+                fallback_analysis = lightweight_transition_preview(current_track, candidate)
+                if not fallback_analysis:
+                    continue
+                analysis = fallback_analysis
+            transition_candidates.append(
+                {
+                    "trackB": compact_track(candidate),
+                    "compatibility": analysis.get("compatibility"),
+                    "difficulty": analysis.get("difficulty"),
+                    "breakdown": analysis.get("breakdown") or {},
+                    "mixPoints": analysis.get("mixPoints") or {},
+                }
+            )
+        transition_candidates.sort(key=lambda item: float(item.get("compatibility") or 0), reverse=True)
+
+    if not transition_candidates:
+        raw_recs = context.get("recommendations") or []
+        if isinstance(raw_recs, list):
+            for rec in raw_recs[:4]:
+                if not isinstance(rec, dict):
+                    continue
+                track = rec.get("track") or {}
+                if not isinstance(track, dict):
+                    continue
+                transition_candidates.append(
+                    {
+                        "trackB": {
+                            "id": int(track.get("id") or 0) if str(track.get("id") or "").strip() else 0,
+                            "title": str(track.get("title") or "").strip() or "Unknown Track",
+                            "artist": str(track.get("artist") or "").strip() or "Unknown Artist",
+                            "bpm": round(float(track.get("bpm") or 0.0), 2) if track.get("bpm") is not None else 0.0,
+                            "camelot_key": str(track.get("camelot_key") or track.get("key") or "").strip(),
+                            "musical_key": str(track.get("musical_key") or track.get("key") or "").strip(),
+                            "energy": round(float(track.get("energy") or 0.0), 2) if track.get("energy") is not None else 0.0,
+                            "note": round(float(track.get("note") or 0.0), 2) if track.get("note") is not None else 0.0,
+                            "genre": str(track.get("genre") or "").strip(),
+                        },
+                        "compatibility": rec.get("compatibility"),
+                        "difficulty": rec.get("difficulty"),
+                        "breakdown": rec.get("breakdown") or {},
+                        "mixPoints": rec.get("mixPoints") or {},
+                    }
+                )
+    context["transitionCandidates"] = transition_candidates[:4]
+
+    context["librarySnapshot"] = [compact_track(track) for track in library_rows[:10]]
+
+    internet_results: List[Dict[str, Any]] = []
+    internet_query_used = ""
+    for candidate_query in infer_queries():
+        rows = music_hub.search(candidate_query, limit=10)
+        if rows:
+            internet_results = rows
+            internet_query_used = candidate_query
+            break
+
+    internet_probe = internet_results if internet_results else music_hub.search("techno", limit=4)
+    provider_count = len({str(row.get("source") or "").strip() for row in internet_probe if row.get("source")})
+    context["internetInsights"] = {
+        "connected": bool(internet_probe),
+        "providerCount": provider_count,
+        "queryUsed": internet_query_used,
+        "results": [
+            {
+                "source": row.get("source"),
+                "title": row.get("title"),
+                "artist": row.get("artist"),
+                "duration": row.get("duration"),
+                "genre": row.get("genre"),
+            }
+            for row in internet_results[:6]
+        ],
+        "message": "Internet metadata reachable." if internet_probe else "Internet metadata not reachable right now.",
+    }
+
     reply = ai_service.assistant_reply(prompt, context=context)
+    internet_state = context.get("internetInsights") or {}
+    if isinstance(reply, dict):
+        reply["internetConnected"] = bool(internet_state.get("connected"))
+        reply["internetProviderCount"] = int(internet_state.get("providerCount") or 0)
     db.add_event(
         "ai.chat",
         {"prompt": prompt[:200], "source": reply.get("source", "local")},

@@ -186,6 +186,24 @@
       white-space: nowrap;
     }
 
+    .update-btn-mini {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(18, 13, 4, 0.95);
+      color: var(--text-secondary);
+      padding: 8px 10px;
+      cursor: pointer;
+      font-size: 0.78rem;
+      white-space: nowrap;
+      transition: border-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+    }
+
+    .update-btn-mini.has-update {
+      border-color: rgba(255, 201, 40, 0.62);
+      color: #ffdf7a;
+      box-shadow: 0 0 0 1px rgba(255, 201, 40, 0.2), 0 8px 18px rgba(255, 201, 40, 0.2);
+    }
+
     .status-pill {
       display: inline-flex;
       align-items: center;
@@ -837,6 +855,52 @@
       padding: 10px;
       font-size: 0.88rem;
       color: var(--text-secondary);
+    }
+
+    .path-drop-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .path-drop-zone {
+      border: 1px dashed rgba(255, 201, 40, 0.48);
+      border-radius: 12px;
+      background: linear-gradient(160deg, rgba(32, 23, 7, 0.94), rgba(17, 13, 4, 0.95));
+      padding: 11px 12px;
+      min-height: 92px;
+      display: grid;
+      gap: 5px;
+      align-content: center;
+      transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+    }
+
+    .path-drop-zone .title {
+      font-size: 0.82rem;
+      font-weight: 850;
+      color: var(--accent-alt);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .path-drop-zone .hint {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+
+    .path-drop-zone .path {
+      font-size: 0.77rem;
+      color: #f8de8a;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .path-drop-zone.drag-over {
+      border-color: rgba(255, 201, 40, 0.84);
+      box-shadow: 0 0 0 2px rgba(255, 201, 40, 0.22), 0 10px 22px rgba(0, 0, 0, 0.28);
+      transform: translateY(-1px);
     }
 
     .analysis-grid {
@@ -2421,9 +2485,13 @@
         display: none;
       }
 
-      .logout-btn-mini {
-        display: none;
-      }
+    .logout-btn-mini {
+      display: none;
+    }
+
+    .update-btn-mini {
+      display: none;
+    }
 
       .live-btn {
         min-width: 108px;
@@ -2596,6 +2664,7 @@
         </div>
       </div>
       <div class="user-quick">
+        <button class="update-btn-mini hidden" id="updateDesktopBtn" type="button">Vérifier update</button>
         <button class="user-name-btn" id="openAccountBtn" type="button">Profil DJ</button>
         <button class="logout-btn-mini" id="logoutBtn" type="button">Déconnexion</button>
       </div>
@@ -2785,6 +2854,13 @@
           <div class="row" style="margin-top:10px;">
             <input class="input" id="libraryPathInput" type="text" placeholder="Chemin dossier audio (optionnel en desktop auto-sync)" />
             <button class="btn glow-btn" type="button" id="scanLibraryBtn">Analyser audio</button>
+          </div>
+          <div class="path-drop-grid">
+            <div class="path-drop-zone" id="musicDropZone">
+              <div class="title">Drag & Drop Musique</div>
+              <div class="hint">Glisse un dossier/fichier audio ou une app musique (Apple Music/Spotify/Deezer).</div>
+              <div class="path" id="musicDropStatus">Le chemin sera copié automatiquement dans le champ scan.</div>
+            </div>
           </div>
           <div class="coach-list">
             <div class="coach-tip" id="scanStatus">Aucun scan bibliothèque lancé. En desktop, Maya détecte automatiquement les dossiers musique.</div>
@@ -2989,6 +3065,13 @@
             <input class="input" id="feedPathInput" type="text" placeholder="/path/to/serato_feed.json (mode fichier feed)" />
             </div>
           </details>
+          <div class="path-drop-grid">
+            <div class="path-drop-zone" id="seratoDropZone">
+              <div class="title">Drag & Drop Serato</div>
+              <div class="hint">Glisse Serato DJ Pro.app, un dossier _Serato_ ou un fichier session.</div>
+              <div class="path" id="seratoDropStatus">Le chemin Serato History sera détecté automatiquement.</div>
+            </div>
+          </div>
           <div class="row" style="margin-top:8px;">
             <button class="btn" id="wsConnectBtn" type="button">Connecter Serato</button>
             <button class="btn ghost" id="wsDisconnectBtn" type="button">Déconnecter</button>

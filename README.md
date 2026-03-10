@@ -22,6 +22,8 @@ This repo is cloud-ready with:
 4. Once deployed, you get a URL like:
    - `https://maya-mixa-cloud.onrender.com`
 
+This blueprint sets `MAYA_DB_PATH=/app/data/maya.db` so DJ accounts/sessions/history stay persistent on Render disk.
+
 Health check:
 
 ```bash
@@ -45,13 +47,16 @@ Set:
 ```json
 {
   "apiBase": "https://YOUR-API-DOMAIN",
-  "appUrl": "https://YOUR-API-DOMAIN"
+  "appUrl": ""
 }
 ```
 
 The Electron preload injects this into the renderer (`window.mayaConfig.apiBase`).
 
-`appUrl` lets your client receive UI updates from the cloud without reinstalling desktop binaries.
+`appUrl` is optional:
+
+- `""` (recommended default for packaged delivery): load bundled UI from the desktop binary.
+- `"https://YOUR-APP-DOMAIN"`: load UI from cloud (enables cloud UI updates without reinstall).
 
 Quick config command:
 
@@ -79,6 +84,24 @@ Build installers:
 ```bash
 npm run electron:dist
 ```
+
+Build macOS safely (fixes Gatekeeper "application is damaged" caused by Finder/FileProvider xattrs in synced folders):
+
+```bash
+npm run electron:dist:mac
+```
+
+Optional mac targets:
+
+```bash
+npm run electron:dist:mac:arm64
+npm run electron:dist:mac:x64
+npm run electron:dist:mac:universal
+```
+
+If your app is distributed without Apple Developer ID notarization, macOS can still block first launch from Internet downloads.  
+For production client delivery without warnings, sign + notarize with an Apple Developer account.  
+The `electron:dist:mac*` scripts in this repo already repair invalid local signatures caused by synced folders (iCloud/FileProvider), which prevents the "application is damaged" packaging error.
 
 Outputs are generated in:
 
@@ -129,6 +152,7 @@ npm run electron:dev:cloud
 - `electron/preload.cjs` exposes:
   - `window.mayaConfig.apiBase`
   - `window.mayaConfig.isElectron`
+  - `window.mayaDesktop.auth` (desktop cache for token + last DJ ID)
 
 ### Frontend API resolution
 
@@ -142,6 +166,7 @@ npm run electron:dev:cloud
 Before launch, configure environment variables (see `.env.example`):
 
 - `MAYA_ENV=production`
+- `MAYA_DB_PATH` (persistent sqlite path, e.g. `/app/data/maya.db`)
 - `MAYA_AUTH_SECRET` (strong secret)
 - `MAYA_AUTH_PASSWORDLESS=true` for ID-only DJ login (no password entry)
 - `MAYA_CORS_ORIGINS` (strict whitelist)
@@ -240,6 +265,13 @@ Without these credentials, frontend buttons remain visible but disabled and prov
 - Bridge mode is forced to `push` and deck updates are posted automatically to the cloud API.
 - On logout, the relay is stopped and bridge state is cleaned.
 
+### Drag & drop path setup (client-friendly)
+
+- In **Session**, drop `Serato DJ Pro.app` (or `_Serato_` folder / session file) into the Serato drop zone.
+- Maya auto-detects and fills `historyPath` then persists this path locally.
+- In **Bibliothèque**, drop a music folder, audio file, or music app (`Apple Music` / `Spotify` / `Deezer`) into the music drop zone.
+- Maya auto-fills the local scan path and persists it locally.
+
 ### Fallback CLI relay (only if not using Electron)
 
 Use this only for browser-only usage:
@@ -259,6 +291,20 @@ For remote OpenAI co-coach (optional):
 - `OPENAI_MODEL` (default in `.env.example`)
 
 Without OpenAI key, local AI engine remains active.
+
+## 14) Updates without uninstall/reinstall
+
+- Keep `appUrl=""` for stable bundled UI, or set `appUrl=https://...` for cloud-hosted UI hot updates.
+- A desktop update check is exposed in-app (`Vérifier update` / `Update vX.Y.Z`) to open the latest release page.
+- If cloud UI load fails, Electron now falls back automatically to bundled local `index.html`.
+
+## 15) Session persistence (no account recreation)
+
+- Desktop now persists auth token + last DJ ID in both:
+  - browser localStorage
+  - Electron userData auth cache (`window.mayaDesktop.auth`)
+- On launch, Maya restores token first; if token is expired and passwordless mode is active, Maya auto-logins with the last DJ ID.
+- If a DJ clicks inscription with an existing ID, the app auto-switches to login and restores the profile instead of forcing a new account.
 
 ## Core files
 

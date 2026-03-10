@@ -18,6 +18,60 @@ function normalizeBase(raw) {
   return String(raw || '').trim().replace(/\/+$/, '');
 }
 
+function authStatePath() {
+  return path.join(app.getPath('userData'), 'auth-state.json');
+}
+
+function sanitizeAuthField(value, limit = 4096) {
+  return String(value || '').trim().slice(0, limit);
+}
+
+function loadAuthState() {
+  const fallback = { token: '', loginId: '' };
+  try {
+    const target = authStatePath();
+    if (!fs.existsSync(target)) return fallback;
+    const raw = fs.readFileSync(target, 'utf8');
+    const parsed = JSON.parse(raw || '{}');
+    return {
+      token: sanitizeAuthField(parsed.token || ''),
+      loginId: sanitizeAuthField(parsed.loginId || '').toLowerCase(),
+    };
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function saveAuthState(patch = {}) {
+  const current = loadAuthState();
+  const next = {
+    token: Object.prototype.hasOwnProperty.call(patch, 'token')
+      ? sanitizeAuthField(patch.token || '')
+      : current.token,
+    loginId: Object.prototype.hasOwnProperty.call(patch, 'loginId')
+      ? sanitizeAuthField(patch.loginId || '').toLowerCase()
+      : current.loginId,
+  };
+  try {
+    const target = authStatePath();
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify(next, null, 2), 'utf8');
+  } catch (_) {
+    // Best effort.
+  }
+  return next;
+}
+
+function clearAuthState() {
+  try {
+    const target = authStatePath();
+    if (fs.existsSync(target)) fs.unlinkSync(target);
+  } catch (_) {
+    // Best effort.
+  }
+  return { token: '', loginId: '' };
+}
+
 function expandHome(inputPath) {
   const value = String(inputPath || '').trim();
   if (!value) return '';
@@ -544,6 +598,9 @@ ipcMain.handle('maya-serato-stop', async () => stopSeratoRelay({ disconnect: tru
 ipcMain.handle('maya-serato-status', async () => relayStatus());
 ipcMain.handle('maya-library-scan', async (_event, payload) => scanLocalLibrary(payload || {}));
 ipcMain.handle('maya-updates-check', async () => checkDesktopUpdates());
+ipcMain.handle('maya-auth-load', async () => loadAuthState());
+ipcMain.handle('maya-auth-save', async (_event, payload) => saveAuthState(payload || {}));
+ipcMain.handle('maya-auth-clear', async () => clearAuthState());
 
 function createMainWindow() {
   const appIcon = path.join(__dirname, '..', 'assets', 'icons', 'maya-icon-512.png');
@@ -565,10 +622,22 @@ function createMainWindow() {
 
   const runtimeConfig = readRuntimeConfig();
   const explicitUrl = String(process.env.MAYA_APP_URL || runtimeConfig.appUrl || '').trim();
+  const localIndexPath = path.join(__dirname, '..', 'index.html');
   if (explicitUrl) {
-    win.loadURL(explicitUrl);
+    let fallbackUsed = false;
+    const fallbackToLocal = () => {
+      if (fallbackUsed || win.isDestroyed()) return;
+      fallbackUsed = true;
+      win.loadFile(localIndexPath);
+    };
+    win.webContents.once('did-fail-load', () => {
+      fallbackToLocal();
+    });
+    win.loadURL(explicitUrl).catch(() => {
+      fallbackToLocal();
+    });
   } else {
-    win.loadFile(path.join(__dirname, '..', 'index.html'));
+    win.loadFile(localIndexPath);
   }
 
   win.webContents.setWindowOpenHandler(({ url }) => {

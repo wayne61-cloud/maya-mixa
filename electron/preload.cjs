@@ -34,4 +34,9 @@ contextBridge.exposeInMainWorld('mayaDesktop', {
   updates: {
     check: () => ipcRenderer.invoke('maya-updates-check'),
   },
+  auth: {
+    load: () => ipcRenderer.invoke('maya-auth-load'),
+    save: (payload = {}) => ipcRenderer.invoke('maya-auth-save', payload),
+    clear: () => ipcRenderer.invoke('maya-auth-clear'),
+  },
 });

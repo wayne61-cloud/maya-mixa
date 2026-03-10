@@ -15,7 +15,10 @@
     "electron:dev:local": "cross-env MAYA_API_BASE=http://127.0.0.1:4173 electron .",
     "electron:dev:cloud": "electron .",
     "electron:dist": "electron-builder",
-    "electron:dist:mac": "electron-builder --mac",
+    "electron:dist:mac": "node scripts/macos-repair-build.mjs --arch arm64",
+    "electron:dist:mac:arm64": "node scripts/macos-repair-build.mjs --arch arm64",
+    "electron:dist:mac:x64": "node scripts/macos-repair-build.mjs --arch x64",
+    "electron:dist:mac:universal": "node scripts/macos-repair-build.mjs --arch universal",
     "electron:dist:win": "electron-builder --win",
     "electron:dist:linux": "electron-builder --linux"
   },

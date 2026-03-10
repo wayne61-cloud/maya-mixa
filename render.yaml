@@ -14,6 +14,8 @@ services:
     envVars:
       - key: MAYA_ENV
         value: production
+      - key: MAYA_DB_PATH
+        value: /app/data/maya.db
       - key: MAYA_AUTH_SECRET
         generateValue: true
       - key: MAYA_AUTH_PASSWORDLESS
