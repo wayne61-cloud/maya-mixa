@@ -2877,8 +2877,128 @@ def external_track_to_runtime(external: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def external_track_to_local_payload(external: Dict[str, Any]) -> Dict[str, Any]:
-    runtime = external_track_to_runtime(external)
+def external_track_to_runtime_with_defaults(
+    external: Dict[str, Any],
+    reference_track: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    try:
+        return external_track_to_runtime(external)
+    except ValueError:
+        pass
+
+    metadata = external.get("metadata") or {}
+    intelligence = external.get("intelligence") or {}
+    raw_features = intelligence.get("features") or {}
+
+    def _positive_float(*values: Any, default: float) -> float:
+        for value in values:
+            try:
+                number = float(value)
+            except Exception:
+                continue
+            if np.isfinite(number) and number > 0:
+                return float(number)
+        return float(default)
+
+    bpm = _positive_float(
+        external.get("bpm"),
+        metadata.get("bpm"),
+        (reference_track or {}).get("bpm"),
+        default=124.0,
+    )
+    duration = _positive_float(
+        external.get("duration"),
+        metadata.get("duration"),
+        (reference_track or {}).get("duration"),
+        default=360.0,
+    )
+    energy = clamp(
+        _positive_float(
+            external.get("energy"),
+            external.get("note"),
+            (reference_track or {}).get("energy"),
+            (reference_track or {}).get("note"),
+            default=7.0,
+        ),
+        1.0,
+        10.0,
+    )
+    note = clamp(
+        _positive_float(
+            external.get("note"),
+            external.get("energy"),
+            (reference_track or {}).get("note"),
+            (reference_track or {}).get("energy"),
+            default=energy,
+        ),
+        1.0,
+        10.0,
+    )
+
+    camelot_key = str(external.get("camelot_key") or "").strip().upper()
+    musical_key = str(external.get("musical_key") or "").strip()
+    if not camelot_key:
+        camelot_key = str((reference_track or {}).get("camelot_key") or "").strip().upper()
+    if not musical_key:
+        musical_key = str((reference_track or {}).get("musical_key") or "").strip()
+    if not camelot_key and not musical_key:
+        camelot_key = "8A"
+        musical_key = "A minor"
+    elif camelot_key and not musical_key:
+        musical_key = "A minor" if camelot_key.endswith("A") else "C major"
+
+    derived = _derive_feature_vector(
+        bpm=bpm,
+        energy=energy,
+        note=note,
+        confidence=0.35,
+        source="external-default",
+    )
+    features: Dict[str, Any] = {}
+    for key in ("bass", "melodic", "percussion", "brightness", "groove", "danceability"):
+        try:
+            value = float(raw_features.get(key))
+            if np.isfinite(value):
+                features[key] = round(value, 2)
+                continue
+        except Exception:
+            pass
+        features[key] = derived[key]
+    features["analysis_confidence"] = round(
+        clamp(
+            _positive_float(
+                raw_features.get("analysis_confidence"),
+                external.get("confidence"),
+                default=0.35,
+            ),
+            0.0,
+            1.0,
+        ),
+        3,
+    )
+    features["source"] = str(raw_features.get("source") or "external-default")
+
+    tags_raw = external.get("tags") or []
+    tags = [str(tag).strip() for tag in tags_raw if str(tag).strip()] if isinstance(tags_raw, list) else []
+
+    return {
+        "id": external.get("id"),
+        "title": str(external.get("title") or "Unknown Track").strip() or "Unknown Track",
+        "artist": str(external.get("artist") or "Unknown Artist").strip() or "Unknown Artist",
+        "duration": duration,
+        "bpm": bpm,
+        "musical_key": musical_key,
+        "camelot_key": camelot_key,
+        "energy": energy,
+        "note": note,
+        "genre": str(external.get("genre") or (reference_track or {}).get("genre") or "unknown").strip().lower() or "unknown",
+        "tags": tags,
+        "features": features,
+    }
+
+
+def external_track_to_local_payload(external: Dict[str, Any], allow_defaults: bool = False) -> Dict[str, Any]:
+    runtime = external_track_to_runtime_with_defaults(external) if allow_defaults else external_track_to_runtime(external)
     source = str(external.get("source") or "web").strip().lower() or "web"
     source_track_id = str(external.get("source_track_id") or external.get("id") or "unknown").strip()
     title = str(runtime.get("title") or "Unknown Track").strip() or "Unknown Track"
@@ -3895,7 +4015,7 @@ class AdminUserUpdateRequest(BaseModel):
     status: Optional[str] = None
 
 
-app = FastAPI(title="Maya Mixa Backend", version="2.5.1")
+app = FastAPI(title="Maya Mixa Backend", version="2.5.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -4234,14 +4354,11 @@ def score_external_against_library(
     user_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     local_tracks = db.list_tracks(limit=2000, user_id=user_id)
-    try:
-        runtime_external = external_track_to_runtime(external_track)
-    except ValueError:
-        return []
+    runtime_external = external_track_to_runtime_with_defaults(external_track)
     scored = []
     for local in local_tracks:
         try:
-            analysis = analyze_transition(local, runtime_external, ai_service)
+            analysis = analyze_transition(local, runtime_external, ai_service, allow_remote_tips=False)
         except ValueError:
             continue
         scored.append(
@@ -5876,14 +5993,17 @@ def search_unified(q: str = Query(default="", min_length=1), limit: int = 20, us
     if not external_rows:
         external_rows = db.list_external_tracks(query=q, limit=max(1, min(limit, 40)))
 
-    current_track = get_current_local_track(user_id=user_id)
+    bridge_state = serato_bridges.get_state(user_id)
+    current_track = get_current_local_track(user_id=user_id, bridge_state=bridge_state)
+    if not current_track:
+        current_track = runtime_track_from_bridge_deck(bridge_state.get("deckA") or {}, deck_label="Deck A")
     enriched_rows = []
     for row in external_rows:
         entry = dict(row)
         if current_track:
             try:
-                runtime = external_track_to_runtime(row)
-                analysis = analyze_transition(current_track, runtime, ai_service)
+                runtime = external_track_to_runtime_with_defaults(row, reference_track=current_track)
+                analysis = analyze_transition(current_track, runtime, ai_service, allow_remote_tips=False)
                 entry["current_track_compatibility"] = analysis["compatibility"]
                 entry["current_track_difficulty"] = analysis["difficulty"]
             except ValueError:
@@ -5942,10 +6062,18 @@ def external_track_detail(
         row = upsert_external_from_metadata(metadata, deep=True)
 
     current_track = get_current_local_track(user_id=user_id)
+    if not current_track:
+        bridge_state = serato_bridges.get_state(user_id)
+        current_track = runtime_track_from_bridge_deck(bridge_state.get("deckA") or {}, deck_label="Deck A")
     current_analysis = None
     if current_track:
         try:
-            current_analysis = analyze_transition(current_track, external_track_to_runtime(row), ai_service)
+            current_analysis = analyze_transition(
+                current_track,
+                external_track_to_runtime_with_defaults(row, reference_track=current_track),
+                ai_service,
+                allow_remote_tips=False,
+            )
         except ValueError:
             current_analysis = None
 
@@ -6049,7 +6177,10 @@ def external_track_import_local(external_id: int, user: Dict[str, Any] = Depends
     row = db.get_external_track(external_id)
     if not row:
         raise HTTPException(status_code=404, detail="External track not found")
-    payload = external_track_to_local_payload(row)
+    try:
+        payload = external_track_to_local_payload(row, allow_defaults=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     track = db.upsert_track(payload)
     db.link_user_track(user_id, int(track["id"]))
     db.add_event(

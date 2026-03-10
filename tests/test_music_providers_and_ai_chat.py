@@ -5,7 +5,7 @@ os.environ.setdefault("MAYA_AUTH_PASSWORDLESS", "false")
 
 from fastapi.testclient import TestClient
 
-from backend.app import app
+from backend.app import app, db
 
 
 client = TestClient(app)
@@ -66,3 +66,109 @@ def test_ai_chat_endpoint_returns_reply() -> None:
     assert isinstance(reply.get("text"), str)
     assert reply.get("text")
     assert reply.get("source") in {"local", "openai"}
+
+
+def test_external_import_local_accepts_incomplete_metadata_with_defaults() -> None:
+    token, user = register_user("ExtImportPass123!")
+    headers = auth_headers(token)
+
+    unique_id = f"pytest-ext-{secrets.token_hex(6)}"
+    external = db.upsert_external_track(
+        {
+            "source": "pytest",
+            "source_track_id": unique_id,
+            "source_url": "",
+            "title": "Incomplete External Track",
+            "artist": "External Artist",
+            "version": "",
+            "duration": None,
+            "bpm": None,
+            "musical_key": "",
+            "camelot_key": "",
+            "energy": None,
+            "note": None,
+            "genre": "unknown",
+            "tags": [],
+            "mood_tags": [],
+            "confidence": 0.0,
+            "metadata": {"source": "pytest", "source_track_id": unique_id},
+            "intelligence": {"features": {}, "deep": False},
+        }
+    )
+
+    response = client.post(f"/api/external/{external['id']}/import-local", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    track = payload.get("track") or {}
+    assert float(track.get("bpm") or 0) > 0
+    assert float(track.get("duration") or 0) > 0
+    assert track.get("camelot_key") or track.get("musical_key")
+
+    tracks = client.get("/api/library/tracks?limit=50", headers=headers)
+    assert tracks.status_code == 200, tracks.text
+    titles = [row.get("title") for row in tracks.json().get("tracks") or []]
+    assert "Incomplete External Track" in titles
+
+
+def test_search_unified_computes_compatibility_from_live_serato_deck_without_track_id(monkeypatch) -> None:
+    token, user = register_user("SearchCompatPass123!")
+    headers = auth_headers(token)
+
+    monkeypatch.setattr("backend.app.music_hub.search", lambda q, limit=20: [])
+
+    connect = client.post("/api/serato/connect", headers=headers, json={})
+    assert connect.status_code == 200, connect.text
+
+    push = client.post(
+        "/api/serato/push",
+        headers=headers,
+        json={
+            "source": "pytest-serato",
+            "payload": {
+                "deckA": {
+                    "track": {
+                        "title": "Live Deck Track",
+                        "artist": "Deck Artist",
+                        "bpm": 126.0,
+                        "key": "8A",
+                    },
+                    "position": 90.0,
+                }
+            },
+        },
+    )
+    assert push.status_code == 200, push.text
+
+    query = f"pytest-search-{secrets.token_hex(4)}"
+    source_track_id = f"{query}-id"
+    db.upsert_external_track(
+        {
+            "source": "pytest",
+            "source_track_id": source_track_id,
+            "source_url": "",
+            "title": query,
+            "artist": "Search External",
+            "version": "",
+            "duration": None,
+            "bpm": None,
+            "musical_key": "",
+            "camelot_key": "",
+            "energy": None,
+            "note": None,
+            "genre": "unknown",
+            "tags": [],
+            "mood_tags": [],
+            "confidence": 0.0,
+            "metadata": {"source": "pytest", "source_track_id": source_track_id},
+            "intelligence": {"features": {}, "deep": False},
+        }
+    )
+
+    response = client.get(f"/api/search/unified?q={query}&limit=10", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    rows = payload.get("global") or []
+    target = next((row for row in rows if str(row.get("source_track_id")) == source_track_id), None)
+    assert target is not None
+    assert target.get("current_track_compatibility") is not None
+    assert target.get("current_track_difficulty") in {"easy", "medium", "hard"}
