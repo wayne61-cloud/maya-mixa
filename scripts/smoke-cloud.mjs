@@ -153,12 +153,22 @@ async function main() {
     }
 
     try {
-      const appleSync = await api(base, "POST", "/api/library/apple/sync?seeds_limit=6&per_query_limit=2", token, {});
-      checks.push({
-        name: "apple-sync",
-        pass: Number(appleSync?.discovered || 0) >= 0 && Number(appleSync?.uniqueExternalTracks || 0) >= 0,
-        detail: `discovered=${appleSync?.discovered || 0} unique=${appleSync?.uniqueExternalTracks || 0}`,
-      });
+      const providers = await api(base, "GET", "/api/music/providers", token);
+      const apple = providers?.providers?.apple_music || {};
+      if (!apple.connected) {
+        checks.push({
+          name: "apple-sync",
+          pass: true,
+          detail: "skipped (Apple Music non connecté)",
+        });
+      } else {
+        const appleSync = await api(base, "POST", "/api/music/providers/apple_music/sync", token, { limit: 80 });
+        checks.push({
+          name: "apple-sync",
+          pass: Number(appleSync?.fetched || 0) >= 0,
+          detail: `fetched=${appleSync?.fetched || 0} linked=${appleSync?.linked || 0}`,
+        });
+      }
     } catch (error) {
       checks.push({ name: "apple-sync", pass: false, detail: String(error.message || error) });
     }

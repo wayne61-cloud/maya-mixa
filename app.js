@@ -854,6 +854,12 @@
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remain).padStart(2, "0")}`;
   }
 
+  function formatNumber(value, digits = 2, fallback = "N/A") {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    return number.toFixed(digits);
+  }
+
   function compatClass(score) {
     if (score >= 86) return "compat-easy";
     if (score >= 72) return "compat-medium";
@@ -872,73 +878,45 @@
     node.classList.toggle("playing", Boolean(isPlaying));
   }
 
-  function hashString32(value) {
-    let hash = 2166136261;
-    const text = String(value || "");
-    for (let i = 0; i < text.length; i += 1) {
-      hash ^= text.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    return hash >>> 0;
+  function extractWaveformSamples(track) {
+    const features = track?.features || track?.intelligence?.features || {};
+    const raw = features?.waveform_samples;
+    if (!Array.isArray(raw) || !raw.length) return [];
+    return raw
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+      .map((value) => clamp(value, 0, 1));
   }
 
-  function seededRandom(seed) {
-    let t = seed >>> 0;
-    return () => {
-      t += 0x6d2b79f5;
-      let v = t;
-      v = Math.imul(v ^ (v >>> 15), v | 1);
-      v ^= v + Math.imul(v ^ (v >>> 7), v | 61);
-      return ((v ^ (v >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
-  function computeTrackStructure(track) {
-    const duration = Math.max(120, Number(track?.duration || 360));
-    const energy = clamp(Number(track?.energy || track?.note || 6), 1, 10);
-    const buildBoost = clamp((energy - 5) / 8, -0.22, 0.22);
-    const dropBoost = clamp((energy - 5) / 6, -0.25, 0.25);
-    const base = [
-      { key: "intro", label: "Intro", weight: 0.2 - buildBoost * 0.35 },
-      { key: "build", label: "Build", weight: 0.19 + buildBoost * 0.35 },
-      { key: "drop", label: "Drop", weight: 0.23 + dropBoost * 0.42 },
-      { key: "break", label: "Break", weight: 0.16 - dropBoost * 0.2 },
-      { key: "outro", label: "Outro", weight: 0.22 - buildBoost * 0.05 },
-    ].map((seg) => ({ ...seg, weight: clamp(seg.weight, 0.08, 0.38) }));
-
-    const totalWeight = base.reduce((acc, seg) => acc + seg.weight, 0) || 1;
-    let cursor = 0;
-    return base.map((seg, idx) => {
-      const pctRaw = (seg.weight / totalWeight) * 100;
-      const startPct = cursor;
-      const pct = idx === base.length - 1 ? Math.max(4, 100 - cursor) : Math.max(8, Math.round(pctRaw * 10) / 10);
-      const endPct = startPct + pct;
-      const startSec = Math.round((duration * startPct) / 100);
-      const endSec = Math.round((duration * endPct) / 100);
-      cursor += pct;
-      return { ...seg, pct, startPct, endPct, startSec, endSec };
-    });
-  }
-
-  function buildWaveformSamples(track, points = 86) {
-    const bpm = clamp(Number(track?.bpm || 124), 90, 160);
-    const energy = clamp(Number(track?.energy || track?.note || 6), 1, 10);
-    const seed = hashString32(`${track?.id || ""}|${track?.title || ""}|${track?.artist || ""}|${bpm.toFixed(2)}|${energy.toFixed(2)}`);
-    const rnd = seededRandom(seed);
-    const structure = computeTrackStructure(track);
-    const out = [];
-    for (let i = 0; i < points; i += 1) {
-      const x = i / Math.max(1, points - 1);
-      const phaseA = Math.sin((x * bpm) / 5.4);
-      const phaseB = Math.sin((x * bpm) / 2.2 + 0.7);
-      const noise = (rnd() - 0.5) * 0.52;
-      const progressPct = x * 100;
-      const seg = structure.find((item) => progressPct >= item.startPct && progressPct < item.endPct) || structure[structure.length - 1];
-      const segBoost = seg?.key === "drop" ? 0.28 : seg?.key === "build" ? 0.14 : seg?.key === "break" ? -0.12 : 0.02;
-      const raw = 0.46 + phaseA * 0.2 + phaseB * 0.16 + noise + (energy - 5) * 0.03 + segBoost;
-      out.push(clamp(raw, 0.06, 1));
-    }
-    return out;
+  function extractStructureSegments(track) {
+    const features = track?.features || track?.intelligence?.features || {};
+    const raw = features?.structure_segments;
+    if (!Array.isArray(raw) || !raw.length) return [];
+    return raw
+      .map((row) => {
+        const startSec = Number(row?.startSec);
+        const endSec = Number(row?.endSec);
+        const pct = Number(row?.pct);
+        const key = String(row?.key || "").trim().toLowerCase() || "segment";
+        const label = String(row?.label || key || "Segment").trim() || "Segment";
+        if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) return null;
+        const safePct = Number.isFinite(pct) && pct > 0 ? pct : null;
+        return {
+          key,
+          label,
+          startSec: Math.max(0, Math.round(startSec)),
+          endSec: Math.max(0, Math.round(endSec)),
+          pct: safePct,
+        };
+      })
+      .filter(Boolean)
+      .map((row, idx, arr) => {
+        if (row.pct) return row;
+        const duration = Math.max(1, Number(track?.duration || 0));
+        const computed = ((row.endSec - row.startSec) / duration) * 100;
+        const pct = idx === arr.length - 1 ? Math.max(3, 100 - arr.slice(0, idx).reduce((acc, part) => acc + (part.pct || 0), 0)) : Math.max(3, computed);
+        return { ...row, pct };
+      });
   }
 
   function renderWaveformCanvas(node, samples) {
@@ -978,12 +956,16 @@
       if (labelNode) labelNode.textContent = "Aucune data";
       return;
     }
-    const samples = buildWaveformSamples(track);
-    const structure = computeTrackStructure(track);
+    const samples = extractWaveformSamples(track);
+    const structure = extractStructureSegments(track);
     renderWaveformCanvas(waveNode, samples);
     renderStructureSegments(structureNode, structure);
     if (labelNode) {
-      labelNode.textContent = `${Number(track.bpm || 0).toFixed(2)} BPM • ${track.camelot_key || track.musical_key || "-"} • ${formatTime(track.duration || 0)}`;
+      if (!samples.length || !structure.length) {
+        labelNode.textContent = "Waveform indisponible: analyse audio locale requise.";
+      } else {
+        labelNode.textContent = `${Number(track.bpm || 0).toFixed(2)} BPM • ${track.camelot_key || track.musical_key || "-"} • ${formatTime(track.duration || 0)}`;
+      }
     }
   }
 
@@ -1008,6 +990,9 @@
     const connection = providerState.connection || {};
     const mail = connection.externalEmail ? ` • ${esc(connection.externalEmail)}` : "";
     const expiresAt = connection.expiresAt ? `Expire: ${new Date(connection.expiresAt).toLocaleString()}` : "Token: session active";
+    const canConnect = Boolean(providerState.configured);
+    const canSync = Boolean(providerState.configured && providerState.connected);
+    const canDisconnect = Boolean(providerState.connected);
     const baseMeta = providerState.configured
       ? providerState.connected
         ? `Compte lié${mail}`
@@ -1024,9 +1009,9 @@
           <div>${esc(expiresAt)}</div>
         </div>
         <div class="provider-actions">
-          <button class="btn glow-btn" type="button" data-provider-connect="${esc(provider)}">Connecter</button>
-          <button class="btn ghost" type="button" data-provider-sync="${esc(provider)}">Sync</button>
-          <button class="btn ghost" type="button" data-provider-disconnect="${esc(provider)}">Déconnecter</button>
+          <button class="btn glow-btn" type="button" data-provider-connect="${esc(provider)}" ${canConnect ? "" : "disabled"}>Connecter</button>
+          <button class="btn ghost" type="button" data-provider-sync="${esc(provider)}" ${canSync ? "" : "disabled"}>Sync</button>
+          <button class="btn ghost" type="button" data-provider-disconnect="${esc(provider)}" ${canDisconnect ? "" : "disabled"}>Déconnecter</button>
         </div>
       </article>
     `;
@@ -1100,8 +1085,13 @@
 
   async function startMusicProviderConnect(provider) {
     const key = String(provider || "").toLowerCase();
+    const stateProvider = state.musicProviders?.[key] || {};
     if (!state.auth.token) {
       showToast("Connexion requise");
+      return;
+    }
+    if (!stateProvider.configured) {
+      showToast(`${providerDisplayName(key)} non configuré sur le backend.`);
       return;
     }
     if (key === "apple_music") {
@@ -1120,6 +1110,11 @@
 
   async function syncMusicProvider(provider) {
     const key = String(provider || "").toLowerCase();
+    const stateProvider = state.musicProviders?.[key] || {};
+    if (!stateProvider.connected) {
+      showToast(`${providerDisplayName(key)} doit être connecté avant la sync.`);
+      return;
+    }
     try {
       const payload = await api("POST", `/api/music/providers/${encodeURIComponent(key)}/sync`, { limit: 220 });
       const created = Number(payload?.created || 0);
@@ -1139,6 +1134,11 @@
 
   async function disconnectMusicProvider(provider) {
     const key = String(provider || "").toLowerCase();
+    const stateProvider = state.musicProviders?.[key] || {};
+    if (!stateProvider.connected) {
+      showToast(`${providerDisplayName(key)} déjà déconnecté.`);
+      return;
+    }
     try {
       await api("POST", `/api/music/providers/${encodeURIComponent(key)}/disconnect`, {});
       await refreshMusicProviders();
@@ -2583,13 +2583,17 @@
     const keyValue = track.camelot_key || track.musical_key || "-";
     const durationValue = Number(track.duration || 0);
     const kpis = [
-      { label: "BPM", value: Number(track.bpm).toFixed(2), tone: "bpm" },
+      { label: "BPM", value: formatNumber(track.bpm, 2), tone: "bpm" },
       { label: "Clé", value: keyValue, tone: "key" },
-      { label: "Énergie", value: `${Number(track.energy || 0).toFixed(1)}/10`, tone: "energy" },
-      { label: "Note", value: `${Number(track.note).toFixed(1)}/10`, tone: "note" },
-      { label: "Durée", value: formatTime(durationValue), tone: "confidence" },
+      { label: "Énergie", value: Number.isFinite(Number(track.energy)) ? `${formatNumber(track.energy, 1)}/10` : "N/A", tone: "energy" },
+      { label: "Note", value: Number.isFinite(Number(track.note)) ? `${formatNumber(track.note, 1)}/10` : "N/A", tone: "note" },
+      { label: "Durée", value: durationValue > 0 ? formatTime(durationValue) : "N/A", tone: "confidence" },
       { label: "Confiance", value: `${(confidence * 100).toFixed(0)}%`, tone: "confidence" },
-      { label: "Dance", value: `${Number(features.danceability || 0).toFixed(1)}/10`, tone: "dance" },
+      {
+        label: "Dance",
+        value: Number.isFinite(Number(features.danceability)) ? `${formatNumber(features.danceability, 1)}/10` : "N/A",
+        tone: "dance",
+      },
     ];
 
     el.analysisKpis.innerHTML = kpis
@@ -3031,7 +3035,7 @@
   }
 
   async function refreshRecommendations() {
-    const deckAId = state.serato.deckA?.track_id || Number(el.trackASelect.value);
+    const deckAId = state.serato?.status === "connected" ? Number(state.serato?.deckA?.track_id || 0) : 0;
     if (!deckAId) {
       state.recommendations = [];
       renderNowPlaying();
@@ -3231,18 +3235,14 @@
     if (el.appleSyncBtn) el.appleSyncBtn.disabled = true;
     try {
       const appleProvider = state.musicProviders?.apple_music || {};
-      let payload = null;
-      if (appleProvider.connected) {
-        payload = await api("POST", "/api/music/providers/apple_music/sync", { limit: 220 });
-      } else {
-        payload = await api("POST", "/api/library/apple/sync?seeds_limit=12&per_query_limit=4", {});
-      }
+      if (!appleProvider.connected) throw new Error("Apple Music non connecté.");
+      const payload = await api("POST", "/api/music/providers/apple_music/sync", { limit: 220 });
       state.lastAppleSyncAt = new Date().toISOString();
       setAppleSyncTimestamp(state.lastAppleSyncAt);
       const discovered = Number(
         payload?.externalEnriched || payload?.fetched || payload?.uniqueExternalTracks || payload?.discovered || 0
       );
-      const sourceLabel = appleProvider.connected ? "Apple Music" : "iTunes catalog";
+      const sourceLabel = "Apple Music";
       el.scanStatus.textContent = `Sync ${sourceLabel} terminée: ${discovered} morceaux traités.`;
       await loadTracks();
       await runUnifiedSearch();
@@ -3257,6 +3257,8 @@
   }
 
   async function maybeAutoSyncAppleCatalog() {
+    const appleProvider = state.musicProviders?.apple_music || {};
+    if (!appleProvider.connected) return;
     const last = getAppleSyncTimestamp();
     if (last) {
       const lastMs = Date.parse(last);
@@ -3344,13 +3346,16 @@
     const seenAtMs = Date.parse(state.serato?.lastSeen || "");
     if (!force && state.serato?.status === "connected" && Number.isFinite(seenAtMs) && now - seenAtMs < 12000) return;
 
-    try {
-      await api("POST", "/api/serato/connect", { mode: "push", ws_url: "", history_path: "", feed_path: "" });
-    } catch (_) {
-      // Keep best effort for automatic runtime.
+    if (state.seratoRelay.connected) {
+      if (state.serato?.status !== "connected") {
+        try {
+          await api("POST", "/api/serato/connect", { mode: "push", ws_url: "", history_path: "", feed_path: "" });
+        } catch (_) {
+          // Keep trying on next poll.
+        }
+      }
+      return;
     }
-
-    if (state.seratoRelay.connected) return;
     const preferred = String(el.wsUrlInput?.value || "").trim();
     const candidates = [preferred, "ws://127.0.0.1:8787", "ws://localhost:8787"]
       .map((url) => String(url || "").trim())
@@ -3360,6 +3365,7 @@
     for (const candidate of candidates) {
       try {
         await startSeratoRelay(candidate);
+        await api("POST", "/api/serato/connect", { mode: "push", ws_url: "", history_path: "", feed_path: "" });
         if (el.wsUrlInput) el.wsUrlInput.value = candidate;
         await refreshSerato();
         updateTopStatus();
@@ -3421,30 +3427,7 @@
       console.error(error);
       stopSeratoRelay();
       const errorText = String(error.message || error || "Erreur inconnue");
-      let fallbackConnected = false;
-      if (selectedMode === "relay_websocket") {
-        try {
-          state.serato = await api("POST", "/api/serato/connect", {
-            mode: "push",
-            ws_url: "",
-            history_path: "",
-            feed_path: "",
-          });
-          updateTopStatus();
-          fallbackConnected = true;
-          if (el.wsStatusDetail) {
-            el.wsStatusDetail.textContent =
-              "Bridge cloud connecté, mais relais local Serato introuvable. Ouvre l'app desktop Maya Mixa pour la synchro auto.";
-          }
-        } catch (_) {
-          fallbackConnected = false;
-        }
-      }
-      if (fallbackConnected) {
-        showToast("Bridge partiel actif. Pour la synchro Serato live automatique, utilise l'app desktop Maya Mixa.");
-      } else {
-        showToast(`Connexion bridge impossible: ${errorText}`);
-      }
+      showToast(`Connexion bridge impossible: ${errorText}`);
     }
   }
 

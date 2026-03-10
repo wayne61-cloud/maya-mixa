@@ -2167,6 +2167,53 @@ class AudioAnalyzer:
 
         confidence = clamp((key_confidence * 0.35 + min(1.0, np.mean(rms) * 8) * 0.25 + min(1.0, np.std(onset_strength) / 8) * 0.4), 0.0, 1.0)
 
+        # Real waveform envelope downsampled for UI rendering.
+        wave_bins = np.array_split(rms, max(24, min(96, len(rms)))) if len(rms) > 0 else []
+        waveform_samples = [float(np.max(chunk)) for chunk in wave_bins if len(chunk)]
+        if waveform_samples:
+            max_wave = max(waveform_samples) or 1.0
+            waveform_samples = [round(clamp(sample / max_wave, 0.0, 1.0), 4) for sample in waveform_samples]
+
+        # Section boundaries derived from onset energy (intro/build/drop/break/outro).
+        structure_segments: List[Dict[str, Any]] = []
+        if len(onset_strength):
+            window = max(4, min(32, int(len(onset_strength) * 0.06)))
+            kernel = np.ones(window, dtype=np.float64) / float(window)
+            smooth = np.convolve(onset_strength, kernel, mode="same")
+            peak_idx = int(np.argmax(smooth))
+            peak_ratio = peak_idx / max(1, len(smooth) - 1)
+        else:
+            peak_ratio = 0.5
+
+        drop_center = clamp(float(peak_ratio), 0.32, 0.78)
+        drop_start = clamp(drop_center - 0.08, 0.18, 0.82)
+        drop_end = clamp(drop_center + 0.09, drop_start + 0.05, 0.90)
+        intro_end = clamp(drop_start - 0.14, 0.08, 0.35)
+        break_end = clamp(drop_end + 0.14, drop_end + 0.05, 0.96)
+
+        sections = [
+            ("intro", "Intro", 0.0, intro_end),
+            ("build", "Build", intro_end, drop_start),
+            ("drop", "Drop", drop_start, drop_end),
+            ("break", "Break", drop_end, break_end),
+            ("outro", "Outro", break_end, 1.0),
+        ]
+        for key, label, start_ratio, end_ratio in sections:
+            if end_ratio <= start_ratio:
+                continue
+            start_sec = int(round(float(duration) * start_ratio))
+            end_sec = int(round(float(duration) * end_ratio))
+            pct = round((end_ratio - start_ratio) * 100.0, 2)
+            structure_segments.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "startSec": max(0, start_sec),
+                    "endSec": max(0, end_sec),
+                    "pct": max(0.0, pct),
+                }
+            )
+
         return {
             "file_path": str(path),
             "file_hash": compute_sha1(path),
@@ -2193,6 +2240,8 @@ class AudioAnalyzer:
                 "rms_mean": round(float(np.mean(rms)), 6),
                 "onset_mean": round(float(np.mean(onset_strength)), 6),
                 "rolloff_mean": round(float(np.mean(rolloff)), 2),
+                "waveform_samples": waveform_samples,
+                "structure_segments": structure_segments,
             },
         }
 
@@ -2398,128 +2447,157 @@ class MusicMetadataHub:
 
 
 class ExternalTrackIntelligence:
-    GENRE_BPM_HINTS = {
-        "techno": 127.0,
-        "melodic techno": 125.0,
-        "hard techno": 131.0,
-        "house": 124.0,
-        "progressive house": 123.0,
-        "trance": 132.0,
-        "electronic": 126.0,
-    }
+    REQUIRED_FEATURE_KEYS = ("bass", "melodic", "percussion", "brightness", "groove", "danceability")
 
     def __init__(self, ai_service: AIService) -> None:
         self.ai_service = ai_service
 
     @staticmethod
-    def _stable_number(seed: str, min_val: float, max_val: float) -> float:
-        digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
-        ratio = int(digest[:8], 16) / 0xFFFFFFFF
-        return min_val + (max_val - min_val) * ratio
+    def _as_float(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            num = float(value)
+            if not np.isfinite(num):
+                return None
+            return num
+        except Exception:
+            return None
 
-    def _heuristic_profile(self, meta: Dict[str, Any]) -> Dict[str, Any]:
-        genre_hint = (meta.get("genre") or "electronic").lower()
-        base_bpm = None
-        for genre_key, bpm in self.GENRE_BPM_HINTS.items():
-            if genre_key in genre_hint:
-                base_bpm = bpm
-                break
-        if base_bpm is None:
-            base_bpm = 126.0
+    @staticmethod
+    def _as_list(raw: Any) -> List[str]:
+        if isinstance(raw, str):
+            parts = [part.strip() for part in re.split(r"[|,;/]", raw) if part.strip()]
+            return parts
+        if isinstance(raw, (list, tuple, set)):
+            return [str(part).strip() for part in raw if str(part).strip()]
+        return []
 
-        seed = f"{meta.get('artist','')}-{meta.get('title','')}-{meta.get('source_track_id','')}"
-        bpm = round(self._stable_number(seed + "bpm", base_bpm - 4.0, base_bpm + 4.0), 2)
-        energy = round(self._stable_number(seed + "energy", 5.4, 8.9), 2)
-        note = round(self._stable_number(seed + "note", 5.6, 8.7), 2)
+    @staticmethod
+    def _derive_features(bpm: Optional[float], energy: Optional[float], note: Optional[float], confidence: float, source: str) -> Dict[str, Any]:
+        if bpm is None or energy is None:
+            return {"analysis_confidence": round(clamp(float(confidence), 0.0, 1.0), 3), "source": source}
+        melodic_anchor = note if note is not None else clamp(10.2 - energy * 0.68, 1.0, 10.0)
+        percussion = clamp((float(bpm) - 108.0) / 3.0, 1.0, 10.0)
+        bass = clamp(float(energy) + 0.6, 1.0, 10.0)
+        melodic = clamp(float(melodic_anchor), 1.0, 10.0)
+        brightness = clamp(melodic * 0.92, 1.0, 10.0)
+        groove = clamp((percussion + melodic) / 2.0, 1.0, 10.0)
+        danceability = clamp((float(bpm) / 128.0) * 4.4 + percussion * 0.36 + groove * 0.35, 1.0, 10.0)
+        return {
+            "bass": round(bass, 2),
+            "melodic": round(melodic, 2),
+            "percussion": round(percussion, 2),
+            "brightness": round(brightness, 2),
+            "groove": round(groove, 2),
+            "danceability": round(danceability, 2),
+            "analysis_confidence": round(clamp(float(confidence), 0.0, 1.0), 3),
+            "source": source,
+        }
 
-        camelot_candidates = ["6A", "7A", "8A", "9A", "10A", "8B", "9B", "10B"]
-        camelot = camelot_candidates[int(self._stable_number(seed + "key", 0, len(camelot_candidates) - 0.001))]
-        musical = "Unknown"
-        if camelot.endswith("A"):
-            musical = "Minor"
-        elif camelot.endswith("B"):
-            musical = "Major"
+    def _metadata_profile(self, meta: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = meta.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        intelligence = metadata.get("intelligence") or {}
+        if not isinstance(intelligence, dict):
+            intelligence = {}
 
-        tags = []
-        if "techno" in genre_hint:
-            tags.extend(["club", "4x4", "dj-tool"])
-        if energy >= 8.0:
-            tags.append("peak-time")
-        if energy <= 6.2:
-            tags.append("warmup")
+        bpm = self._as_float(meta.get("bpm"))
+        if bpm is None:
+            bpm = self._as_float(metadata.get("bpm")) or self._as_float(metadata.get("tempo"))
 
-        mood_tags = ["dark" if energy >= 7.4 else "groovy", "driving" if bpm >= 126 else "rolling"]
+        energy = self._as_float(meta.get("energy"))
+        if energy is None:
+            energy = self._as_float(metadata.get("energy"))
 
-        bass = clamp(energy + 0.8, 1, 10)
-        melodic = clamp(11 - energy, 1, 10)
-        percussion = clamp((bpm - 118) / 2.0, 1, 10)
-        brightness = clamp(melodic * 0.9, 1, 10)
-        groove = clamp((percussion + melodic) / 2.0, 1, 10)
-        danceability = clamp((bpm / 128.0) * 4.4 + percussion * 0.36 + groove * 0.35, 1, 10)
+        note = self._as_float(meta.get("note"))
+        if note is None:
+            note = self._as_float(metadata.get("note"))
+
+        camelot_key = str(meta.get("camelot_key") or metadata.get("camelot_key") or "").strip().upper()
+        musical_key = str(meta.get("musical_key") or metadata.get("musical_key") or "").strip()
+        genre = str(meta.get("genre") or metadata.get("genre") or "unknown").strip().lower() or "unknown"
+
+        tags = sorted(set(self._as_list(meta.get("tags")) + self._as_list(metadata.get("tags"))))
+        mood_tags = sorted(set(self._as_list(meta.get("mood_tags")) + self._as_list(metadata.get("mood_tags"))))
+
+        confidence = self._as_float(meta.get("confidence"))
+        if confidence is None:
+            confidence = self._as_float(metadata.get("confidence")) or 0.0
+        confidence = clamp(float(confidence), 0.0, 1.0)
+
+        raw_features = intelligence.get("features") if isinstance(intelligence.get("features"), dict) else {}
+        if not raw_features and isinstance(meta.get("features"), dict):
+            raw_features = meta.get("features") or {}
+
+        features: Dict[str, Any] = {}
+        for key in self.REQUIRED_FEATURE_KEYS:
+            value = self._as_float(raw_features.get(key))
+            if value is not None:
+                features[key] = round(clamp(value, 0.0, 10.0), 2)
+
+        if len(features) < len(self.REQUIRED_FEATURE_KEYS):
+            derived = self._derive_features(bpm=bpm, energy=energy, note=note, confidence=confidence, source="metadata-derived")
+            for key in self.REQUIRED_FEATURE_KEYS:
+                if key not in features and key in derived:
+                    features[key] = derived[key]
+            features["analysis_confidence"] = derived["analysis_confidence"]
+            features["source"] = "metadata-derived"
+        else:
+            features["analysis_confidence"] = round(clamp(float(raw_features.get("analysis_confidence", confidence)), 0.0, 1.0), 3)
+            features["source"] = str(raw_features.get("source") or "metadata").strip()
 
         return {
-            "bpm": bpm,
-            "camelot_key": camelot,
-            "musical_key": musical,
-            "energy": energy,
-            "note": note,
-            "genre": genre_hint or "electronic",
-            "tags": sorted(set(tags)),
-            "mood_tags": sorted(set(mood_tags)),
-            "confidence": 0.52,
-            "features": {
-                "bass": round(bass, 2),
-                "melodic": round(melodic, 2),
-                "percussion": round(percussion, 2),
-                "brightness": round(brightness, 2),
-                "groove": round(groove, 2),
-                "danceability": round(danceability, 2),
-                "analysis_confidence": 0.52,
-                "source": "heuristic",
-            },
+            "bpm": round(float(bpm), 2) if bpm is not None and bpm > 0 else None,
+            "camelot_key": camelot_key,
+            "musical_key": musical_key,
+            "energy": round(clamp(float(energy), 1.0, 10.0), 2) if energy is not None else None,
+            "note": round(clamp(float(note), 1.0, 10.0), 2) if note is not None else None,
+            "genre": genre,
+            "tags": tags,
+            "mood_tags": mood_tags,
+            "confidence": round(float(confidence), 3),
+            "features": features,
         }
 
     def enrich(self, meta: Dict[str, Any], deep: bool = False) -> Dict[str, Any]:
-        heuristic = self._heuristic_profile(meta)
+        profile = self._metadata_profile(meta)
         if not deep:
-            return heuristic
+            return profile
 
         estimated = self.ai_service.external_track_estimate(meta)
         if not estimated:
-            heuristic["features"]["source"] = "heuristic-fallback"
-            return heuristic
+            profile["features"]["source"] = str(profile["features"].get("source") or "metadata")
+            return profile
 
-        bpm = estimated.get("bpm") or heuristic["bpm"]
-        energy = estimated.get("energy") or heuristic["energy"]
-        note = estimated.get("note") or heuristic["note"]
+        bpm = self._as_float(estimated.get("bpm"))
+        energy = self._as_float(estimated.get("energy"))
+        note = self._as_float(estimated.get("note"))
+        confidence = self._as_float(estimated.get("confidence"))
+        confidence = clamp(float(confidence if confidence is not None else profile.get("confidence") or 0.0), 0.0, 1.0)
 
-        bass = clamp(energy + 0.7, 1, 10)
-        melodic = clamp(10.5 - energy, 1, 10)
-        percussion = clamp((bpm - 118) / 2.2, 1, 10)
-        brightness = clamp((melodic + 1.5), 1, 10)
-        groove = clamp((percussion + melodic) / 2.0, 1, 10)
-        danceability = clamp((bpm / 128.0) * 4.4 + percussion * 0.36 + groove * 0.35, 1, 10)
+        merged_tags = sorted(set((profile.get("tags") or []) + self._as_list(estimated.get("tags"))))
+        merged_mood = sorted(set((profile.get("mood_tags") or []) + self._as_list(estimated.get("mood_tags"))))
+        merged_features = self._derive_features(
+            bpm=bpm if bpm is not None else self._as_float(profile.get("bpm")),
+            energy=energy if energy is not None else self._as_float(profile.get("energy")),
+            note=note if note is not None else self._as_float(profile.get("note")),
+            confidence=confidence,
+            source="openai-estimate",
+        )
 
         return {
-            "bpm": round(float(bpm), 2),
-            "camelot_key": estimated.get("camelot_key") or heuristic["camelot_key"],
-            "musical_key": estimated.get("musical_key") or heuristic["musical_key"],
-            "energy": round(float(energy), 2),
-            "note": round(float(note), 2),
-            "genre": estimated.get("genre") or heuristic["genre"],
-            "tags": sorted(set(estimated.get("tags") or heuristic["tags"])),
-            "mood_tags": sorted(set(estimated.get("mood_tags") or heuristic["mood_tags"])),
-            "confidence": round(float(estimated.get("confidence") or 0.62), 3),
-            "features": {
-                "bass": round(bass, 2),
-                "melodic": round(melodic, 2),
-                "percussion": round(percussion, 2),
-                "brightness": round(brightness, 2),
-                "groove": round(groove, 2),
-                "danceability": round(danceability, 2),
-                "analysis_confidence": round(float(estimated.get("confidence") or 0.62), 3),
-                "source": "openai-estimate",
-            },
+            "bpm": round(float(bpm), 2) if bpm is not None and bpm > 0 else profile.get("bpm"),
+            "camelot_key": str(estimated.get("camelot_key") or profile.get("camelot_key") or "").strip().upper(),
+            "musical_key": str(estimated.get("musical_key") or profile.get("musical_key") or "").strip(),
+            "energy": round(clamp(float(energy), 1.0, 10.0), 2) if energy is not None else profile.get("energy"),
+            "note": round(clamp(float(note), 1.0, 10.0), 2) if note is not None else profile.get("note"),
+            "genre": str(estimated.get("genre") or profile.get("genre") or "unknown").strip().lower() or "unknown",
+            "tags": merged_tags,
+            "mood_tags": merged_mood,
+            "confidence": round(float(confidence), 3),
+            "features": merged_features,
         }
 
 
@@ -2555,45 +2633,70 @@ def harmonic_score(key_a: str, key_b: str) -> float:
     return 0.38
 
 
+def _require_positive_float(value: Any, label: str) -> float:
+    try:
+        number = float(value)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"{label} missing or invalid") from exc
+    if not np.isfinite(number) or number <= 0:
+        raise ValueError(f"{label} missing or invalid")
+    return number
+
+
+def _derive_feature_vector(bpm: float, energy: float, note: float, confidence: float, source: str) -> Dict[str, Any]:
+    percussion = clamp((bpm - 108.0) / 3.0, 1.0, 10.0)
+    bass = clamp(energy + 0.6, 1.0, 10.0)
+    melodic = clamp(note, 1.0, 10.0)
+    brightness = clamp(melodic * 0.92, 1.0, 10.0)
+    groove = clamp((percussion + melodic) / 2.0, 1.0, 10.0)
+    danceability = clamp((bpm / 128.0) * 4.4 + percussion * 0.36 + groove * 0.35, 1.0, 10.0)
+    return {
+        "bass": round(bass, 2),
+        "melodic": round(melodic, 2),
+        "percussion": round(percussion, 2),
+        "brightness": round(brightness, 2),
+        "groove": round(groove, 2),
+        "danceability": round(danceability, 2),
+        "analysis_confidence": round(clamp(confidence, 0.0, 1.0), 3),
+        "source": source,
+    }
+
+
+def _require_feature_vector(track: Dict[str, Any], label: str) -> np.ndarray:
+    features = track.get("features") or {}
+    keys = ("bass", "melodic", "percussion", "brightness", "groove")
+    values: List[float] = []
+    missing: List[str] = []
+    for key in keys:
+        raw = features.get(key)
+        try:
+            value = float(raw)
+        except Exception:
+            value = float("nan")
+        if not np.isfinite(value):
+            missing.append(key)
+            continue
+        values.append(value)
+    if missing:
+        raise ValueError(f"{label} missing feature metrics: {', '.join(missing)}")
+    return np.array(values, dtype=np.float64)
+
+
 def analyze_transition(track_a: Dict[str, Any], track_b: Dict[str, Any], ai_service: AIService) -> Dict[str, Any]:
-    bpm_a = float(track_a.get("bpm") or 0.0)
-    bpm_b = float(track_b.get("bpm") or 0.0)
-    if bpm_a <= 0:
-        bpm_a = 124.0
-    if bpm_b <= 0:
-        bpm_b = 124.0
+    bpm_a = _require_positive_float(track_a.get("bpm"), "trackA bpm")
+    bpm_b = _require_positive_float(track_b.get("bpm"), "trackB bpm")
+    duration_a = _require_positive_float(track_a.get("duration"), "trackA duration")
+    energy_a = clamp(_require_positive_float(track_a.get("energy"), "trackA energy"), 1.0, 10.0)
+    energy_b = clamp(_require_positive_float(track_b.get("energy"), "trackB energy"), 1.0, 10.0)
 
     bpm_diff = abs(bpm_a - bpm_b)
     bpm_score = clamp(1.0 - (bpm_diff / 8.0), 0.22, 1.0)
 
-    key_score = harmonic_score(track_a.get("camelot_key", ""), track_b.get("camelot_key", ""))
-
-    energy_a = float(track_a.get("energy") or 5.5)
-    energy_b = float(track_b.get("energy") or 5.5)
+    key_score = harmonic_score(str(track_a.get("camelot_key") or ""), str(track_b.get("camelot_key") or ""))
     energy_score = clamp(1.0 - abs((energy_b - energy_a) - 0.45) / 4.2, 0.3, 1.0)
 
-    fa = track_a.get("features") or {}
-    fb = track_b.get("features") or {}
-    vec_a = np.array(
-        [
-            float(fa.get("bass", 5.0)),
-            float(fa.get("melodic", 5.0)),
-            float(fa.get("percussion", 5.0)),
-            float(fa.get("brightness", 5.0)),
-            float(fa.get("groove", 5.0)),
-        ],
-        dtype=np.float64,
-    )
-    vec_b = np.array(
-        [
-            float(fb.get("bass", 5.0)),
-            float(fb.get("melodic", 5.0)),
-            float(fb.get("percussion", 5.0)),
-            float(fb.get("brightness", 5.0)),
-            float(fb.get("groove", 5.0)),
-        ],
-        dtype=np.float64,
-    )
+    vec_a = _require_feature_vector(track_a, "trackA")
+    vec_b = _require_feature_vector(track_b, "trackB")
     similarity = float(np.dot(vec_a, vec_b) / ((np.linalg.norm(vec_a) * np.linalg.norm(vec_b)) + 1e-9))
     timbre_score = clamp(similarity, 0.2, 1.0)
 
@@ -2601,7 +2704,6 @@ def analyze_transition(track_a: Dict[str, Any], track_b: Dict[str, Any], ai_serv
     compatibility = round(score * 100, 2)
     difficulty = "easy" if compatibility >= 86 else "medium" if compatibility >= 72 else "hard"
 
-    duration_a = float(track_a.get("duration") or 360.0)
     start_b = max(18, int(duration_a * 0.42))
     phrase_16 = max(8, int((16 * 60) / bpm_a))
     mix_point = min(int(duration_a - 8), start_b + phrase_16)
@@ -2655,59 +2757,67 @@ def analyze_transition(track_a: Dict[str, Any], track_b: Dict[str, Any], ai_serv
 
 def external_track_to_runtime(external: Dict[str, Any]) -> Dict[str, Any]:
     intelligence = external.get("intelligence") or {}
-    features = intelligence.get("features") or {}
+    features = dict(intelligence.get("features") or {})
+    bpm = _require_positive_float(external.get("bpm"), "external bpm")
+    duration = _require_positive_float(external.get("duration"), "external duration")
+    energy = clamp(_require_positive_float(external.get("energy"), "external energy"), 1.0, 10.0)
+    note = clamp(_require_positive_float(external.get("note"), "external note"), 1.0, 10.0)
+    feature_values: Dict[str, float] = {}
+    for key in ("bass", "melodic", "percussion", "brightness", "groove", "danceability"):
+        try:
+            value = float(features.get(key))
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("External track missing complete feature vector") from exc
+        if not np.isfinite(value):
+            raise ValueError("External track missing complete feature vector")
+        feature_values[key] = value
+
     return {
         "id": external.get("id"),
         "title": external.get("title"),
         "artist": external.get("artist"),
-        "duration": external.get("duration") or 360.0,
-        "bpm": external.get("bpm") or 124.0,
-        "musical_key": external.get("musical_key") or "",
-        "camelot_key": external.get("camelot_key") or "",
-        "energy": external.get("energy") or 5.8,
-        "note": external.get("note") or 6.0,
-        "genre": external.get("genre") or "electronic",
+        "duration": duration,
+        "bpm": bpm,
+        "musical_key": str(external.get("musical_key") or "").strip(),
+        "camelot_key": str(external.get("camelot_key") or "").strip().upper(),
+        "energy": energy,
+        "note": note,
+        "genre": str(external.get("genre") or "unknown").strip().lower() or "unknown",
         "tags": external.get("tags") or [],
         "features": {
-            "bass": float(features.get("bass", 5.0)),
-            "melodic": float(features.get("melodic", 5.0)),
-            "percussion": float(features.get("percussion", 5.0)),
-            "brightness": float(features.get("brightness", 5.0)),
-            "groove": float(features.get("groove", 5.0)),
-            "danceability": float(features.get("danceability", 5.0)),
-            "analysis_confidence": float(features.get("analysis_confidence", external.get("confidence") or 0.5)),
+            "bass": feature_values["bass"],
+            "melodic": feature_values["melodic"],
+            "percussion": feature_values["percussion"],
+            "brightness": feature_values["brightness"],
+            "groove": feature_values["groove"],
+            "danceability": feature_values["danceability"],
+            "analysis_confidence": float(features.get("analysis_confidence", external.get("confidence") or 0.0)),
+            "source": str(features.get("source") or "external"),
         },
     }
 
 
 def external_track_to_local_payload(external: Dict[str, Any]) -> Dict[str, Any]:
-    intelligence = external.get("intelligence") or {}
-    features = dict(intelligence.get("features") or {})
-    confidence = float(features.get("analysis_confidence") or external.get("confidence") or intelligence.get("confidence") or 0.55)
-    features["analysis_confidence"] = round(clamp(confidence, 0.0, 1.0), 3)
-    features.setdefault("source", "external-import")
-
+    runtime = external_track_to_runtime(external)
     source = str(external.get("source") or "web").strip().lower() or "web"
     source_track_id = str(external.get("source_track_id") or external.get("id") or "unknown").strip()
-    title = str(external.get("title") or "Unknown Track").strip() or "Unknown Track"
-    artist = str(external.get("artist") or "Unknown Artist").strip() or "Unknown Artist"
+    title = str(runtime.get("title") or "Unknown Track").strip() or "Unknown Track"
+    artist = str(runtime.get("artist") or "Unknown Artist").strip() or "Unknown Artist"
     canonical = re.sub(r"[^a-z0-9]+", "-", f"{source}-{source_track_id}-{artist}-{title}".lower()).strip("-") or "external-track"
     file_path = f"virtual://external-import/{canonical}.mp3"
     file_hash = hashlib.sha1(f"{source}:{source_track_id}:{artist}:{title}".encode("utf-8")).hexdigest()
 
-    raw_tags = external.get("tags") or []
+    raw_tags = runtime.get("tags") or []
     if isinstance(raw_tags, str):
         tags = [part.strip() for part in raw_tags.split("|") if part.strip()]
     else:
         tags = [str(part).strip() for part in raw_tags if str(part).strip()]
     tags = sorted(set(tags + ["external-import", source]))
 
-    key_value = str(external.get("camelot_key") or "").strip()
-    musical_key = str(external.get("musical_key") or "").strip()
-    if not musical_key and key_value:
-        musical_key = "A minor" if key_value.upper().endswith("A") else "C major"
-    if not key_value and musical_key:
-        key_value = "8A"
+    key_value = str(runtime.get("camelot_key") or "").strip().upper()
+    musical_key = str(runtime.get("musical_key") or "").strip()
+    if not key_value and not musical_key:
+        raise ValueError("External track missing key metadata")
 
     return {
         "file_path": file_path,
@@ -2715,78 +2825,64 @@ def external_track_to_local_payload(external: Dict[str, Any]) -> Dict[str, Any]:
         "title": title,
         "artist": artist,
         "album": str(external.get("version") or "").strip(),
-        "duration": max(60.0, float(external.get("duration") or 360.0)),
-        "bpm": float(external.get("bpm") or 124.0),
+        "duration": runtime["duration"],
+        "bpm": runtime["bpm"],
         "musical_key": musical_key,
         "camelot_key": key_value,
-        "energy": clamp(float(external.get("energy") or 6.0), 1.0, 10.0),
-        "note": clamp(float(external.get("note") or 6.0), 1.0, 10.0),
-        "genre": str(external.get("genre") or "electronic").strip() or "electronic",
+        "energy": runtime["energy"],
+        "note": runtime["note"],
+        "genre": runtime["genre"],
         "tags": tags,
-        "features": features,
+        "features": runtime["features"],
     }
 
 
 def manifest_track_to_local_payload(item: Dict[str, Any], source: str = "desktop_manifest") -> Dict[str, Any]:
     raw_path = str(item.get("file_path") or item.get("path") or "").strip()
+    if not raw_path:
+        raise ValueError("file_path is required for manifest import")
+
     title = str(item.get("title") or "").strip()
     artist = str(item.get("artist") or "").strip()
     album = str(item.get("album") or "").strip()
 
-    if raw_path:
-        guessed = Path(raw_path).stem.strip()
-        if not title and guessed:
-            if " - " in guessed:
-                left, right = guessed.split(" - ", 1)
-                if not artist:
-                    artist = left.strip()
-                title = right.strip()
-            else:
-                title = guessed
+    guessed = Path(raw_path).stem.strip()
+    if not title and guessed:
+        if " - " in guessed:
+            left, right = guessed.split(" - ", 1)
+            if not artist:
+                artist = left.strip()
+            title = right.strip()
+        else:
+            title = guessed
 
-    if not title:
-        title = "Unknown Track"
-    if not artist:
-        artist = "Unknown Artist"
+    title = title or "Unknown Track"
+    artist = artist or "Unknown Artist"
 
-    canonical = re.sub(r"[^a-z0-9]+", "-", f"{artist}-{title}".lower()).strip("-") or "desktop-track"
-    file_path = raw_path or f"virtual://desktop-import/{canonical}.mp3"
-    file_hash = hashlib.sha1((str(item.get("file_hash") or "") or file_path).encode("utf-8")).hexdigest()
-    seed = hashlib.sha1(f"{file_path}|{artist}|{title}".encode("utf-8")).hexdigest()
-
-    def seed_ratio(offset: int = 0) -> float:
-        chunk = seed[offset : offset + 8] or seed[:8]
-        return int(chunk, 16) / 0xFFFFFFFF
-
-    bpm = item.get("bpm")
-    if bpm is None:
-        bpm = round(120.0 + seed_ratio(0) * 12.0, 2)
-    else:
-        bpm = float(bpm)
+    bpm = _require_positive_float(item.get("bpm"), "manifest bpm")
+    duration = _require_positive_float(item.get("duration"), "manifest duration")
+    energy = clamp(_require_positive_float(item.get("energy"), "manifest energy"), 1.0, 10.0)
+    note = clamp(_require_positive_float(item.get("note"), "manifest note"), 1.0, 10.0)
 
     camelot = str(item.get("camelot_key") or "").strip().upper()
-    if not camelot:
-        candidates = ["6A", "7A", "8A", "9A", "10A", "8B", "9B", "10B", "11B", "12B"]
-        camelot = candidates[int(seed_ratio(8) * (len(candidates) - 1))]
-
     musical_key = str(item.get("musical_key") or "").strip()
-    if not musical_key:
+    if not camelot and not musical_key:
+        raise ValueError("manifest key metadata required (camelot_key or musical_key)")
+    if not musical_key and camelot:
         musical_key = "A minor" if camelot.endswith("A") else "C major"
 
-    energy = item.get("energy")
-    if energy is None:
-        energy = round(5.2 + seed_ratio(16) * 3.4, 2)
+    features = dict(item.get("features") or {})
+    if not features:
+        features = _derive_feature_vector(bpm=bpm, energy=energy, note=note, confidence=0.62, source=source)
     else:
-        energy = clamp(float(energy), 1.0, 10.0)
+        required = ("bass", "melodic", "percussion", "brightness", "groove", "danceability")
+        missing = [key for key in required if key not in features]
+        if missing:
+            raise ValueError(f"manifest features missing keys: {', '.join(missing)}")
+        features["analysis_confidence"] = clamp(float(features.get("analysis_confidence", 0.62)), 0.0, 1.0)
+        features["source"] = str(features.get("source") or source)
 
-    note = item.get("note")
-    if note is None:
-        note = round(5.6 + seed_ratio(24) * 3.2, 2)
-    else:
-        note = clamp(float(note), 1.0, 10.0)
-
-    duration = max(60.0, float(item.get("duration") or 360.0))
-    genre = str(item.get("genre") or "unknown").strip() or "unknown"
+    genre = str(item.get("genre") or "unknown").strip().lower() or "unknown"
     raw_tags = item.get("tags") or []
     if isinstance(raw_tags, str):
         tags = [part.strip() for part in raw_tags.split("|") if part.strip()]
@@ -2794,21 +2890,9 @@ def manifest_track_to_local_payload(item: Dict[str, Any], source: str = "desktop
         tags = [str(part).strip() for part in raw_tags if str(part).strip()]
     tags = sorted(set(tags + ["desktop-import", source]))
 
-    features = dict(item.get("features") or {})
-    if not features:
-        features = {
-            "bass": round(4.8 + seed_ratio(4) * 3.8, 2),
-            "melodic": round(4.5 + seed_ratio(12) * 3.6, 2),
-            "percussion": round(4.6 + seed_ratio(20) * 3.9, 2),
-            "brightness": round(4.0 + seed_ratio(28) * 3.2, 2),
-            "groove": round(4.7 + seed_ratio(10) * 3.5, 2),
-            "danceability": round(5.2 + seed_ratio(18) * 3.2, 2),
-        }
-    features["analysis_confidence"] = clamp(float(features.get("analysis_confidence", 0.58)), 0.0, 1.0)
-    features["source"] = str(features.get("source") or source)
-
+    file_hash = hashlib.sha1((str(item.get("file_hash") or "") or raw_path).encode("utf-8")).hexdigest()
     return {
-        "file_path": file_path,
+        "file_path": raw_path,
         "file_hash": file_hash,
         "title": title,
         "artist": artist,
@@ -3138,53 +3222,16 @@ class SeratoBridge:
             if track_obj and self.user_id is not None:
                 self.db.link_user_track(self.user_id, int(track_obj["id"]))
 
-        if not track_obj and title:
-            canonical = re.sub(r"[^a-z0-9]+", "-", f"{artist}-{title}".strip().lower()).strip("-") or "serato-track"
-            virtual_path = f"virtual://serato-live/{canonical}.mp3"
-            fallback_bpm = float(bpm if bpm is not None else 124.0)
-            fallback_key = str(key or "8A").strip() or "8A"
-            digest = hashlib.sha1(f"{artist}-{title}-{fallback_bpm}-{fallback_key}".encode("utf-8")).hexdigest()
-            note_seed = int(digest[:6], 16) / float(16**6 - 1)
-            energy_seed = int(digest[6:12], 16) / float(16**6 - 1)
-            inferred = {
-                "file_path": virtual_path,
-                "file_hash": hashlib.sha1(virtual_path.encode("utf-8")).hexdigest(),
-                "title": title,
-                "artist": artist,
-                "album": "",
-                "duration": max(90.0, float(incoming.get("duration") or 360.0)),
-                "bpm": fallback_bpm,
-                "musical_key": fallback_key if not re.match(r"^\d+[AB]$", fallback_key, flags=re.IGNORECASE) else "A minor",
-                "camelot_key": fallback_key if re.match(r"^\d+[AB]$", fallback_key, flags=re.IGNORECASE) else "8A",
-                "energy": round(5.5 + energy_seed * 3.2, 2),
-                "note": round(5.8 + note_seed * 3.0, 2),
-                "genre": "unknown",
-                "tags": ["serato-live", source],
-                "features": {
-                    "bass": round(4.8 + energy_seed * 3.8, 2),
-                    "melodic": round(4.5 + note_seed * 3.6, 2),
-                    "percussion": round(4.6 + energy_seed * 3.9, 2),
-                    "brightness": round(4.0 + note_seed * 3.2, 2),
-                    "groove": round(4.7 + energy_seed * 3.5, 2),
-                    "danceability": round(5.2 + energy_seed * 3.2, 2),
-                    "analysis_confidence": 0.45,
-                    "source": "serato_live_inferred",
-                },
-            }
-            track_obj = self.db.upsert_track(inferred)
-            if self.user_id is not None:
-                self.db.link_user_track(self.user_id, int(track_obj["id"]))
-
         payload = {
             "title": title or (track_obj["title"] if track_obj else "Unknown Track"),
             "artist": artist or (track_obj["artist"] if track_obj else "Unknown Artist"),
             "bpm": float(bpm if bpm is not None else (track_obj["bpm"] if track_obj else 0.0)),
             "key": key or (track_obj["camelot_key"] or track_obj["musical_key"] if track_obj else ""),
             "position": round(position, 2),
-            "path": track_path,
+            "path": track_path or (str(track_obj.get("file_path")) if track_obj else ""),
             "track_id": track_obj["id"] if track_obj else None,
-            "note": track_obj["note"] if track_obj else None,
-            "energy": track_obj["energy"] if track_obj else None,
+            "note": track_obj["note"] if track_obj else incoming.get("note"),
+            "energy": track_obj["energy"] if track_obj else incoming.get("energy"),
         }
 
         deck_key = "deckA" if deck.upper() == "A" else "deckB"
@@ -3868,7 +3915,7 @@ def upsert_external_from_metadata(meta: Dict[str, Any], deep: bool = False) -> D
         "camelot_key": enriched.get("camelot_key") or "",
         "energy": enriched.get("energy"),
         "note": enriched.get("note"),
-        "genre": enriched.get("genre") or meta.get("genre") or "electronic",
+        "genre": enriched.get("genre") or meta.get("genre") or "unknown",
         "tags": enriched.get("tags", []),
         "mood_tags": enriched.get("mood_tags", []),
         "confidence": enriched.get("confidence"),
@@ -3891,10 +3938,16 @@ def score_external_against_library(
     user_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     local_tracks = db.list_tracks(limit=2000, user_id=user_id)
-    runtime_external = external_track_to_runtime(external_track)
+    try:
+        runtime_external = external_track_to_runtime(external_track)
+    except ValueError:
+        return []
     scored = []
     for local in local_tracks:
-        analysis = analyze_transition(local, runtime_external, ai_service)
+        try:
+            analysis = analyze_transition(local, runtime_external, ai_service)
+        except ValueError:
+            continue
         scored.append(
             {
                 "track": local,
@@ -4181,7 +4234,7 @@ def sync_provider_rows_to_library(user_id: int, provider: str, rows: List[Dict[s
     errors: List[str] = []
     for item in rows:
         try:
-            external = upsert_external_from_metadata(item, deep=False)
+            external = upsert_external_from_metadata(item, deep=True)
             external_count += 1
             local_payload = external_track_to_local_payload(external)
             existed = db.get_track_by_path(str(local_payload.get("file_path") or ""))
@@ -4961,17 +5014,16 @@ def music_provider_sync(
 
     if provider_norm == "apple_music":
         connection = db.get_music_connection(user_id, "apple_music")
-        if connection:
-            try:
-                rows = sync_apple_music_library(connection, limit=limit)
-                sync_info = sync_provider_rows_to_library(user_id, provider_norm, rows)
-                return {"ok": True, **sync_info}
-            except HTTPException:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=502, detail=f"Sync Apple Music impossible: {exc}")
-        fallback = run_apple_seed_sync(user_id=user_id, seeds_limit=12, per_query_limit=4)
-        return {"ok": True, "provider": "apple_music", "fallback": True, **fallback}
+        if not connection:
+            raise HTTPException(status_code=400, detail="Apple Music non connecté")
+        try:
+            rows = sync_apple_music_library(connection, limit=limit)
+            sync_info = sync_provider_rows_to_library(user_id, provider_norm, rows)
+            return {"ok": True, **sync_info}
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Sync Apple Music impossible: {exc}")
 
     raise HTTPException(status_code=404, detail="Provider unsupported")
 
@@ -5179,7 +5231,20 @@ def library_import_manifest(payload: LibraryImportManifestRequest, user: Dict[st
             skipped += 1
             continue
         try:
-            local_payload = manifest_track_to_local_payload(row, source=source)
+            raw_path = str(row.get("file_path") or row.get("path") or "").strip()
+            local_payload: Dict[str, Any]
+            if raw_path and Path(raw_path).exists():
+                analyzed = analyzer.analyze_file(Path(raw_path))
+                # Preserve explicit metadata fields from manifest when provided.
+                if str(row.get("title") or "").strip():
+                    analyzed["title"] = str(row.get("title") or "").strip()
+                if str(row.get("artist") or "").strip():
+                    analyzed["artist"] = str(row.get("artist") or "").strip()
+                if str(row.get("album") or "").strip():
+                    analyzed["album"] = str(row.get("album") or "").strip()
+                local_payload = analyzed
+            else:
+                local_payload = manifest_track_to_local_payload(row, source=source)
             file_path = str(local_payload.get("file_path") or "").strip()
             if not file_path or file_path in seen_paths:
                 skipped += 1
@@ -5236,10 +5301,9 @@ def sync_apple_catalog(
     per_query_limit: int = Query(default=4, ge=1, le=12),
     user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    return run_apple_seed_sync(
-        user_id=int(user["id"]),
-        seeds_limit=seeds_limit,
-        per_query_limit=per_query_limit,
+    raise HTTPException(
+        status_code=410,
+        detail="Deprecated endpoint. Use /api/music/providers/apple_music/sync after Apple Music account connection.",
     )
 
 
@@ -5282,10 +5346,14 @@ def search_unified(q: str = Query(default="", min_length=1), limit: int = 20, us
     for row in external_rows:
         entry = dict(row)
         if current_track:
-            runtime = external_track_to_runtime(row)
-            analysis = analyze_transition(current_track, runtime, ai_service)
-            entry["current_track_compatibility"] = analysis["compatibility"]
-            entry["current_track_difficulty"] = analysis["difficulty"]
+            try:
+                runtime = external_track_to_runtime(row)
+                analysis = analyze_transition(current_track, runtime, ai_service)
+                entry["current_track_compatibility"] = analysis["compatibility"]
+                entry["current_track_difficulty"] = analysis["difficulty"]
+            except ValueError:
+                entry["current_track_compatibility"] = None
+                entry["current_track_difficulty"] = None
         else:
             entry["current_track_compatibility"] = None
             entry["current_track_difficulty"] = None
@@ -5341,7 +5409,10 @@ def external_track_detail(
     current_track = get_current_local_track(user_id=user_id)
     current_analysis = None
     if current_track:
-        current_analysis = analyze_transition(current_track, external_track_to_runtime(row), ai_service)
+        try:
+            current_analysis = analyze_transition(current_track, external_track_to_runtime(row), ai_service)
+        except ValueError:
+            current_analysis = None
 
     matches = score_external_against_library(row, limit=matches_limit, user_id=user_id)
     return {
@@ -5494,7 +5565,10 @@ def recommendations(track_id: int, limit: int = 6, user: Dict[str, Any] = Depend
     candidates = [t for t in tracks if t["id"] != track_id]
     scored = []
     for candidate in candidates:
-        analysis = analyze_transition(current, candidate, ai_service)
+        try:
+            analysis = analyze_transition(current, candidate, ai_service)
+        except ValueError:
+            continue
         scored.append(
             {
                 "track": candidate,
@@ -5516,7 +5590,10 @@ def transition_analyze(payload: TransitionRequest, user: Dict[str, Any] = Depend
     if not track_a or not track_b:
         raise HTTPException(status_code=404, detail="Track A or B not found")
 
-    analysis = analyze_transition(track_a, track_b, ai_service)
+    try:
+        analysis = analyze_transition(track_a, track_b, ai_service)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     session = db.current_session(user_id=user_id)
     session_id = session["id"] if session else None
     saved = db.add_transition(session_id, track_a["id"], track_b["id"], analysis, user_id=user_id)
@@ -5546,7 +5623,10 @@ def transition_preview(payload: TransitionRequest, user: Dict[str, Any] = Depend
     if not track_a or not track_b:
         raise HTTPException(status_code=404, detail="Track A or B not found")
 
-    analysis = analyze_transition(track_a, track_b, ai_service)
+    try:
+        analysis = analyze_transition(track_a, track_b, ai_service)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return {
         "analysis": analysis,
         "trackA": track_a,
@@ -5723,7 +5803,10 @@ def live_coach(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, An
         for local in all_tracks:
             if local["id"] == track_a["id"]:
                 continue
-            analysis = analyze_transition(track_a, local, ai_service)
+            try:
+                analysis = analyze_transition(track_a, local, ai_service)
+            except ValueError:
+                continue
             recs.append((analysis["compatibility"], local, analysis))
         recs.sort(key=lambda row: row[0], reverse=True)
         if recs:
@@ -5731,7 +5814,10 @@ def live_coach(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, An
         else:
             raise HTTPException(status_code=404, detail="No candidate track for deck B")
 
-    analysis = analyze_transition(track_a, track_b, ai_service)
+    try:
+        analysis = analyze_transition(track_a, track_b, ai_service)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     position = float(deck_a.get("position") or 0.0)
     start_b = float(analysis["mixPoints"]["startB"])
     mix_point = float(analysis["mixPoints"]["mixPoint"])

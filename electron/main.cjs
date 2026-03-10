@@ -146,9 +146,11 @@ function parseHistoryLine(line) {
     const maybe = JSON.parse(clean);
     if (maybe && typeof maybe === 'object') {
       if (maybe.deckA || maybe.deckB) return maybe;
+      const explicitDeck = normalizeDeckLabel(maybe.deck || maybe.deck_id || maybe.deckIndex || maybe.channel, '');
+      if (!explicitDeck) return null;
       const track = maybe.track && typeof maybe.track === 'object' ? maybe.track : maybe;
       return {
-        deck: normalizeDeckLabel(maybe.deck || maybe.deck_id || maybe.deckIndex || maybe.channel, 'A'),
+        deck: explicitDeck,
         track,
       };
     }
@@ -161,6 +163,7 @@ function parseHistoryLine(line) {
   if (deckToken) {
     deckHint = normalizeDeckLabel(deckToken[1], '');
   }
+  if (!deckHint) return null;
   const withoutDeck = clean
     .replace(/\bdeck\s*[ab12]\b[:\-\s]*/i, '')
     .replace(/^\s*[\[(]?[ab12][\])\s:\-]+/i, '')
@@ -179,9 +182,9 @@ function parseHistoryLine(line) {
   }
 
   return {
-    deck: deckHint || undefined,
+    deck: deckHint,
     track: {
-      artist: 'Unknown Artist',
+      artist: '',
       title: source.slice(0, 180),
     },
   };
@@ -225,7 +228,6 @@ const seratoRelay = {
   fileOffsets: new Map(),
   lastPushAt: null,
   lastError: '',
-  lastDeckHint: 'B',
 };
 
 function relayStatus() {
@@ -277,29 +279,17 @@ function latestHistoryFile(historyRoot) {
   return files[0] || '';
 }
 
-function nextDeckHint() {
-  seratoRelay.lastDeckHint = seratoRelay.lastDeckHint === 'A' ? 'B' : 'A';
-  return seratoRelay.lastDeckHint;
-}
-
 function withDeckFallback(payload, rawLine = '') {
   if (!payload || typeof payload !== 'object') return null;
   if (payload.deckA || payload.deckB) return payload;
   const explicit = normalizeDeckLabel(payload.deck, '');
   if (explicit) {
-    payload.deck = explicit;
-    seratoRelay.lastDeckHint = explicit;
-    return payload;
+    return { ...payload, deck: explicit };
   }
   const token = String(rawLine || '').match(/\bdeck\s*([ab12])\b/i) || String(rawLine || '').match(/^\s*[\[(]?([ab12])[\])\s:\-]+/i);
   const lineGuess = token ? normalizeDeckLabel(token[1], '') : '';
-  if (lineGuess) {
-    payload.deck = lineGuess;
-    seratoRelay.lastDeckHint = lineGuess;
-    return payload;
-  }
-  payload.deck = nextDeckHint();
-  return payload;
+  if (!lineGuess) return null;
+  return { ...payload, deck: lineGuess };
 }
 
 async function relayTick() {
@@ -339,7 +329,7 @@ async function relayTick() {
     let lines = [];
     if (!seratoRelay.fileOffsets.has(latest)) {
       seratoRelay.fileOffsets.set(latest, content.length);
-      lines = allLines.slice(-24);
+      lines = [];
     } else {
       const prevOffset = Number(seratoRelay.fileOffsets.get(latest) || 0);
       const safeOffset = Math.min(prevOffset, content.length);
@@ -404,7 +394,6 @@ async function startSeratoRelay(options = {}) {
   seratoRelay.lastError = '';
   seratoRelay.lastPushAt = null;
   seratoRelay.fileOffsets = new Map();
-  seratoRelay.lastDeckHint = 'B';
 
   seratoRelay.timer = setInterval(() => {
     void relayTick();
@@ -422,7 +411,6 @@ async function stopSeratoRelay(options = {}) {
   seratoRelay.active = false;
   seratoRelay.tickBusy = false;
   seratoRelay.fileOffsets = new Map();
-  seratoRelay.lastDeckHint = 'B';
 
   if (disconnect && seratoRelay.apiBase && seratoRelay.token) {
     try {
