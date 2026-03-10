@@ -3895,7 +3895,7 @@ class AdminUserUpdateRequest(BaseModel):
     status: Optional[str] = None
 
 
-app = FastAPI(title="Maya Mixa Backend", version="2.5.0")
+app = FastAPI(title="Maya Mixa Backend", version="2.5.1")
 
 app.add_middleware(
     CORSMiddleware,

@@ -1,6 +1,6 @@
 {
   "name": "maya-mixa",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "Maya Mixa desktop + cloud-ready DJ copilot",
   "main": "electron/main.cjs",
   "author": "Maya Mixa",
