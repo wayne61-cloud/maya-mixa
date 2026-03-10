@@ -4875,7 +4875,11 @@ def ai_chat(payload: AiChatRequest, user: Dict[str, Any] = Depends(get_current_u
             "mixPoints": {},
         }
 
-    current_track = get_current_local_track(user_id=user_id)
+    bridge_state = serato_bridges.get_state(user_id)
+    deck_a_state = bridge_state.get("deckA") or {}
+    deck_b_state = bridge_state.get("deckB") or {}
+
+    current_track = get_current_local_track(user_id=user_id, bridge_state=bridge_state)
     if not current_track:
         current_payload = context.get("currentTrack") or {}
         if isinstance(current_payload, dict):
@@ -4889,6 +4893,27 @@ def ai_chat(payload: AiChatRequest, user: Dict[str, Any] = Depends(get_current_u
                     current_track = db.find_track(title, artist or "Unknown Artist", user_id=user_id) or db.find_track(
                         title, artist or "Unknown Artist"
                     )
+    if not current_track:
+        current_track = runtime_track_from_bridge_deck(deck_a_state, deck_label="Deck A")
+
+    if deck_a_state:
+        context["seratoDeckA"] = {
+            "title": str(deck_a_state.get("title") or "").strip(),
+            "artist": str(deck_a_state.get("artist") or "").strip(),
+            "bpm": deck_a_state.get("bpm"),
+            "key": str(deck_a_state.get("key") or "").strip(),
+            "position": deck_a_state.get("position"),
+            "trackId": deck_a_state.get("track_id"),
+        }
+    if deck_b_state:
+        context["seratoDeckB"] = {
+            "title": str(deck_b_state.get("title") or "").strip(),
+            "artist": str(deck_b_state.get("artist") or "").strip(),
+            "bpm": deck_b_state.get("bpm"),
+            "key": str(deck_b_state.get("key") or "").strip(),
+            "position": deck_b_state.get("position"),
+            "trackId": deck_b_state.get("track_id"),
+        }
 
     library_rows = db.list_tracks(limit=200, user_id=user_id)
     if current_track:
