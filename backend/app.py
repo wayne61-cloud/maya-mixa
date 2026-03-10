@@ -6125,11 +6125,29 @@ def external_track_detail(
     external_view["intelligence"] = intelligence
     external_view["confidence"] = float((runtime_external.get("features") or {}).get("analysis_confidence") or row.get("confidence") or 0.0)
 
+    analysis_track = current_track
+    analysis_context_mode = "current_track" if current_track else "baseline"
+    if not analysis_track:
+        analysis_track = {
+            "id": None,
+            "title": "Maya Baseline Reference",
+            "artist": "Maya MixIA",
+            "duration": float(runtime_external.get("duration") or 360.0),
+            "bpm": float(runtime_external.get("bpm") or 124.0),
+            "musical_key": str(runtime_external.get("musical_key") or "A minor").strip(),
+            "camelot_key": str(runtime_external.get("camelot_key") or "8A").strip().upper(),
+            "energy": clamp(float(runtime_external.get("energy") or 7.0) - 0.2, 1.0, 10.0),
+            "note": clamp(float(runtime_external.get("note") or 7.0) - 0.1, 1.0, 10.0),
+            "genre": str(runtime_external.get("genre") or "unknown").strip().lower() or "unknown",
+            "tags": ["baseline", "ai-reference"],
+            "features": dict(runtime_external.get("features") or {}),
+        }
+
     current_analysis = None
-    if current_track:
+    if analysis_track:
         try:
             current_analysis = analyze_transition(
-                current_track,
+                analysis_track,
                 runtime_external,
                 ai_service,
                 allow_remote_tips=False,
@@ -6142,6 +6160,7 @@ def external_track_detail(
         "external": external_view,
         "currentTrack": current_track,
         "currentCompatibility": current_analysis,
+        "analysisContext": {"mode": analysis_context_mode},
         "libraryMatches": matches,
     }
 

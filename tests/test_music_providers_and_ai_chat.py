@@ -214,8 +214,11 @@ def test_external_detail_returns_fallback_metrics_when_source_metadata_is_sparse
     external_id = int(rows[0]["id"])
     detail = client.get(f"/api/external/{external_id}?deep=true&matches_limit=5", headers=headers)
     assert detail.status_code == 200, detail.text
-    external = detail.json().get("external") or {}
+    payload = detail.json()
+    external = payload.get("external") or {}
     assert float(external.get("bpm") or 0) > 0
     assert float(external.get("energy") or 0) > 0
     assert float(external.get("note") or 0) > 0
     assert external.get("camelot_key") or external.get("musical_key")
+    assert payload.get("currentCompatibility") is not None
+    assert payload.get("analysisContext", {}).get("mode") in {"baseline", "current_track"}
