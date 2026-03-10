@@ -3763,12 +3763,19 @@
       return;
     }
 
-    const selectedMode = el.seratoModeSelect?.value || "websocket";
-    const useRelay = selectedMode === "relay_websocket";
-    const relayUrl = String(el.wsUrlInput?.value || "").trim() || "ws://127.0.0.1:8787";
+    const selectedModeRaw = String(el.seratoModeSelect?.value || "relay_websocket").trim() || "relay_websocket";
+    const wsInputValue = String(el.wsUrlInput?.value || "").trim();
+    let selectedMode = selectedModeRaw;
+    let useRelay = selectedMode === "relay_websocket";
+    if (!useRelay && selectedMode === "websocket" && !wsInputValue) {
+      // Zero-config safety: websocket mode without URL should fallback to local relay defaults.
+      useRelay = true;
+      selectedMode = "relay_websocket";
+    }
+    const relayUrl = wsInputValue || "ws://127.0.0.1:8787";
     const payload = {
       mode: useRelay ? "push" : selectedMode,
-      ws_url: useRelay ? relayUrl : String(el.wsUrlInput?.value || "").trim(),
+      ws_url: useRelay ? relayUrl : wsInputValue,
       history_path: preferredHistoryPath,
       feed_path: String(el.feedPathInput?.value || "").trim(),
     };
@@ -3781,7 +3788,7 @@
       }
       state.serato = await api("POST", "/api/serato/connect", payload);
       updateTopStatus();
-      showToast(`Bridge en connexion (${selectedMode})`);
+      showToast(`Bridge en connexion (${useRelay ? "mode auto" : selectedMode})`);
       await refreshSerato();
       await refreshLiveCoach();
       await refreshRecommendations();

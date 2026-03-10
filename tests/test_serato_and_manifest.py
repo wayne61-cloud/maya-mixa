@@ -81,6 +81,80 @@ def test_push_serato_connects_only_after_payload_and_maps_decks() -> None:
     assert data["deckB"] is None
 
 
+def test_push_serato_accepts_nested_deck_payload_and_live_coach_works() -> None:
+    token, _ = register_user("SeratoDecks123!")
+    headers = auth_headers(token)
+
+    imported = client.post(
+        "/api/library/import-manifest",
+        headers=headers,
+        json={
+            "source": "pytest_manifest_nested",
+            "tracks": [
+                {
+                    "file_path": "/Users/test/Music/ANNA - Midnight Dreams.mp3",
+                    "title": "Midnight Dreams",
+                    "artist": "ANNA",
+                    "bpm": 126.0,
+                    "camelot_key": "8A",
+                    "duration": 356.0,
+                    "energy": 7.5,
+                    "note": 7.4,
+                }
+            ],
+        },
+    )
+    assert imported.status_code == 200, imported.text
+
+    connect = client.post(
+        "/api/serato/connect",
+        headers=headers,
+        json={"mode": "push"},
+    )
+    assert connect.status_code == 200, connect.text
+
+    push = client.post(
+        "/api/serato/push",
+        headers=headers,
+        json={
+            "source": "pytest-nested",
+            "payload": {
+                "deckA": {
+                    "track": {
+                        "title": "Midnight Dreams",
+                        "artist": "ANNA",
+                        "bpm": 126.1,
+                        "key": "8A",
+                    },
+                    "position": 104.2,
+                },
+                "deckB": {
+                    "track": {
+                        "title": "Hypnotic State",
+                        "artist": "Richie Hawtin",
+                        "bpm": 126.0,
+                        "key": "9A",
+                    },
+                    "position": 8.0,
+                },
+            },
+        },
+    )
+    assert push.status_code == 200, push.text
+    state = push.json()["state"]
+    assert state["deckA"]["title"] == "Midnight Dreams"
+    assert state["deckA"]["artist"] == "ANNA"
+    assert state["deckA"]["track_id"] is not None
+    assert state["deckB"]["title"] == "Hypnotic State"
+    assert state["deckB"]["artist"] == "Richie Hawtin"
+
+    coach = client.get("/api/live/coach", headers=headers)
+    assert coach.status_code == 200, coach.text
+    payload = coach.json()
+    assert payload.get("message")
+    assert payload.get("action")
+
+
 def test_import_manifest_creates_and_updates_user_library() -> None:
     token, _ = register_user("ManifestPass123!")
     headers = auth_headers(token)

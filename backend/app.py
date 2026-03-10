@@ -3276,10 +3276,37 @@ class SeratoBridge:
             except (TypeError, ValueError):
                 return default
 
+        def _first_value(*values: Any) -> Any:
+            for value in values:
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    stripped = value.strip()
+                    if stripped:
+                        return stripped
+                    continue
+                return value
+            return None
+
         def _canon(value: Any) -> str:
             return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
-        raw_track_id = incoming.get("track_id") or incoming.get("trackId") or incoming.get("id")
+        incoming = incoming if isinstance(incoming, dict) else {}
+        nested_track = incoming.get("track") if isinstance(incoming.get("track"), dict) else {}
+        metadata = incoming.get("metadata") if isinstance(incoming.get("metadata"), dict) else {}
+        file_info = incoming.get("file") if isinstance(incoming.get("file"), dict) else {}
+
+        raw_track_id = _first_value(
+            incoming.get("track_id"),
+            incoming.get("trackId"),
+            incoming.get("id"),
+            nested_track.get("track_id"),
+            nested_track.get("trackId"),
+            nested_track.get("id"),
+            metadata.get("track_id"),
+            metadata.get("trackId"),
+            metadata.get("id"),
+        )
         incoming_track_id: Optional[int] = None
         try:
             parsed_id = int(raw_track_id)
@@ -3289,30 +3316,83 @@ class SeratoBridge:
             incoming_track_id = None
 
         track_path = str(
-            incoming.get("path")
-            or incoming.get("file_path")
-            or incoming.get("filePath")
-            or incoming.get("filepath")
+            _first_value(
+                incoming.get("path"),
+                incoming.get("file_path"),
+                incoming.get("filePath"),
+                incoming.get("filepath"),
+                nested_track.get("path"),
+                nested_track.get("file_path"),
+                nested_track.get("filePath"),
+                nested_track.get("filepath"),
+                metadata.get("path"),
+                metadata.get("file_path"),
+                file_info.get("path"),
+                file_info.get("location"),
+            )
             or ""
         ).strip()
         title = str(
-            incoming.get("title")
-            or incoming.get("name")
-            or incoming.get("track_name")
-            or incoming.get("trackTitle")
-            or incoming.get("song")
+            _first_value(
+                incoming.get("title"),
+                incoming.get("name"),
+                incoming.get("track_name"),
+                incoming.get("trackTitle"),
+                incoming.get("song"),
+                nested_track.get("title"),
+                nested_track.get("name"),
+                nested_track.get("track_name"),
+                nested_track.get("trackTitle"),
+                metadata.get("title"),
+                metadata.get("name"),
+            )
             or ""
         ).strip()
         artist = str(
-            incoming.get("artist")
-            or incoming.get("artist_name")
-            or incoming.get("track_artist")
+            _first_value(
+                incoming.get("artist"),
+                incoming.get("artist_name"),
+                incoming.get("track_artist"),
+                nested_track.get("artist"),
+                nested_track.get("artist_name"),
+                nested_track.get("track_artist"),
+                metadata.get("artist"),
+                metadata.get("artist_name"),
+            )
             or ""
         ).strip() or "Unknown Artist"
-        bpm = incoming.get("bpm", incoming.get("tempo"))
-        key = incoming.get("key") or incoming.get("camelot_key") or incoming.get("musical_key")
+        bpm = _first_value(
+            incoming.get("bpm"),
+            incoming.get("tempo"),
+            nested_track.get("bpm"),
+            nested_track.get("tempo"),
+            nested_track.get("BPM"),
+            metadata.get("bpm"),
+            metadata.get("tempo"),
+        )
+        key = _first_value(
+            incoming.get("key"),
+            incoming.get("camelot_key"),
+            incoming.get("musical_key"),
+            nested_track.get("key"),
+            nested_track.get("camelot_key"),
+            nested_track.get("musical_key"),
+            metadata.get("key"),
+            metadata.get("camelot_key"),
+            metadata.get("musical_key"),
+        )
         position = _safe_float(
-            incoming.get("position", incoming.get("playhead", incoming.get("elapsed", 0.0))),
+            _first_value(
+                incoming.get("position"),
+                incoming.get("playhead"),
+                incoming.get("elapsed"),
+                nested_track.get("position"),
+                nested_track.get("playhead"),
+                nested_track.get("elapsed"),
+                metadata.get("position"),
+                metadata.get("playhead"),
+                metadata.get("elapsed"),
+            ),
             default=0.0,
         )
 
@@ -3733,7 +3813,7 @@ class SessionStartRequest(BaseModel):
 
 
 class SeratoConnectRequest(BaseModel):
-    mode: str = Field(..., description="websocket | history | feed_file | push")
+    mode: str = Field(default="push", description="websocket | history | feed_file | push")
     ws_url: str = ""
     history_path: str = ""
     feed_path: str = ""
@@ -4047,6 +4127,62 @@ def get_current_local_track(user_id: Optional[int] = None, bridge_state: Optiona
             db.link_user_track(user_id, int(track_id))
             return db.get_track(int(track_id), user_id=user_id) or global_track
     return None
+
+
+def runtime_track_from_bridge_deck(deck: Dict[str, Any], deck_label: str = "Deck") -> Optional[Dict[str, Any]]:
+    if not isinstance(deck, dict):
+        return None
+
+    title = str(deck.get("title") or "").strip() or f"{deck_label} track"
+    artist = str(deck.get("artist") or "").strip() or "Unknown Artist"
+    bpm_raw = deck.get("bpm")
+    key_raw = str(deck.get("key") or "").strip()
+
+    try:
+        bpm = float(bpm_raw)
+    except Exception:
+        bpm = 0.0
+    if not np.isfinite(bpm) or bpm <= 0:
+        return None
+
+    try:
+        energy = clamp(float(deck.get("energy") or 7.2), 1.0, 10.0)
+    except Exception:
+        energy = 7.2
+    try:
+        note = clamp(float(deck.get("note") or energy), 1.0, 10.0)
+    except Exception:
+        note = energy
+
+    camelot_key = ""
+    musical_key = ""
+    if key_raw:
+        if parse_camelot(key_raw):
+            camelot_key = key_raw.upper()
+        else:
+            musical_key = key_raw
+
+    features = _derive_feature_vector(
+        bpm=bpm,
+        energy=energy,
+        note=note,
+        confidence=0.55,
+        source="serato-telemetry",
+    )
+    return {
+        "id": None,
+        "title": title,
+        "artist": artist,
+        "duration": 360.0,
+        "bpm": bpm,
+        "musical_key": musical_key,
+        "camelot_key": camelot_key,
+        "energy": energy,
+        "note": note,
+        "genre": "unknown",
+        "tags": ["serato", "telemetry"],
+        "features": features,
+    }
 
 
 def resolve_track_for_user(track_id: int, user_id: int, allow_link: bool = False) -> Optional[Dict[str, Any]]:
@@ -4575,6 +4711,11 @@ def health() -> Dict[str, Any]:
         "tracks": len(db.list_tracks(limit=10000)),
         "externalTracks": len(db.list_external_tracks(limit=10000)),
     }
+
+
+@app.get("/health")
+def health_public() -> Dict[str, Any]:
+    return health()
 
 
 @app.get("/api/cloud/status")
@@ -6164,13 +6305,18 @@ def live_coach(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, An
     track_b = resolve_track_for_user(int(deck_b["track_id"]), user_id, allow_link=True) if deck_b.get("track_id") else None
 
     if not track_a:
+        track_a = runtime_track_from_bridge_deck(deck_a, deck_label="Deck A")
+    if not track_b:
+        track_b = runtime_track_from_bridge_deck(deck_b, deck_label="Deck B")
+
+    if not track_a:
         raise HTTPException(status_code=404, detail="Deck A track not available")
 
     if not track_b:
         recs = []
         all_tracks = db.list_tracks(limit=2000, user_id=user_id)
         for local in all_tracks:
-            if local["id"] == track_a["id"]:
+            if track_a.get("id") and local["id"] == track_a.get("id"):
                 continue
             try:
                 analysis = analyze_transition(track_a, local, ai_service)
@@ -6181,7 +6327,19 @@ def live_coach(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, An
         if recs:
             track_b = recs[0][1]
         else:
-            raise HTTPException(status_code=404, detail="No candidate track for deck B")
+            return {
+                "action": "load_library",
+                "message": "Aucune piste candidate dans votre bibliothèque. Synchronisez la librairie puis relancez.",
+                "countdown": None,
+                "position": float(deck_a.get("position") or 0.0),
+                "analysis": None,
+                "trackA": track_a,
+                "trackB": None,
+                "ai": {
+                    "localModel": ai_service.local_model,
+                    "openaiEnabled": ai_service.remote_enabled,
+                },
+            }
 
     try:
         analysis = analyze_transition(track_a, track_b, ai_service)
